@@ -1,2 +1,57 @@
 # PocketGB
-A Game Boy (DMG) emulator for macOS, built with Electron.
+A Game Boy (DMG) emulator for macOS, built with Electron. The CPU and PPU are written from scratch in plain JavaScript — no emulation libraries — and are validated against industry-standard hardware test suites.
+
+text
+Copy
+npm install
+npm start
+Drop a .gb ROM onto the window, or use File → Open ROM… (⌘O).
+
+Accuracy
+Suite	Result
+dmg-acid2 (PPU)	Pixel-perfect — 0 / 23,040 pixel mismatches vs. real DMG hardware
+Blargg cpu_instrs (CPU)	11 / 11 individual tests pass
+Project test suite	13 tests (CPU ops & flags, MBC banking, timer, PPU rendering, save states, smoke ROM)
+The PPU is a dot-driven renderer ported from mGBA's software renderer: pixels are pushed per-dot with register sampling, so mid-scanline writes to LCDC, SCX, WX, and WY land exactly where hardware puts them. The STAT interrupt is edge-triggered per hardware behavior. OAM DMA transfers over 160 m-cycles while the CPU keeps running.
+
+Features
+Emulation — SM83 CPU (full base + CB instruction sets, HALT bug, interrupts), DMG PPU, 4-channel APU (2 pulse, wave, noise) with frame sequencer, DIV/TIMA timers, MBC1 / MBC3 (+ RTC) / MBC5 and ROM-only cartridges
+Persistence — battery saves (.sav), MBC3 RTC storage, and 10 save-state slots per game (⌘1–⌘0 to load, ⌘⇧1–⌘⇧0 to save), auto-flushed every few seconds and on quit
+Display — integer-scaled canvas, three palettes (DMG Green, Pocket Gray, Ember) selectable in-app and persisted
+Audio — Web Audio output matched to your device's real sample rate (no crackle from rate mismatch)
+Convenience — Recent ROMs menu, drag-and-drop from anywhere in the window, pause (⌘P), mute (⌘M), reset (⌘R)
+Controls
+Key	Button
+Arrow keys	D-Pad
+X	A
+Z	B
+Enter	Start
+Shift	Select
+Performance
+The core runs a full frame in ~1.9 ms (≈ 517 fps cap, 8.6× realtime headroom), measured on a CPU-heavy workload — rendering, audio, and timers included. Hot paths are allocation-free per frame; the timer is O(1) via falling-edge counting.
+
+Project layout
+text
+Copy
+main.js               Electron main process (window, menu, file I/O)
+pocketgb-preload.js   IPC bridge (context-isolated)
+app.js                Renderer: main loop, ROM loading, UI wiring
+index.html            UI (Impactor-inspired flat design, pastel purple)
+src/core/             The emulator itself — no DOM, no Electron
+  cpu.js  mmu.js  ppu.js  apu.js  timer.js  joypad.js  cartridge.js  gameboy.js
+src/ui/               Presentation
+  renderer.js  input.js  audio.js
+test/                 Test suite + Blargg/dmg-acid2 harnesses
+fonts/                Hack typeface (MIT)
+The src/core layer is deliberately dependency-free: it loads both as browser globals (for the app) and CommonJS modules (for Node tests).
+
+Testing
+text
+Copy
+npm test                    # unit tests + Blargg cpu_instrs + dmg-acid2
+npm run fetch-tests         # download the Blargg ROMs (freely redistributable)
+The dmg-acid2 test runs the ROM headless until the screen stabilizes, then compares every pixel against the reference image captured from real hardware (includes a tiny dependency-free PNG codec for the comparison).
+
+Data locations
+Saves, save states, and the recent-ROMs list live under Electron's userData directory: ~/Library/Application Support/pocketgb/ on macOS.
+
