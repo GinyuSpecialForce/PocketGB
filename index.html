@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>PocketGB</title>
+  <style>
+    /* Impactor (PlumeImpactor) design language, pastel purple edition. */
+    @font-face {
+      font-family: 'Hack';
+      src: url('fonts/Hack-Regular.ttf') format('truetype');
+      font-weight: normal; font-style: normal;
+    }
+    :root {
+      --bg: #282028;
+      --bg-lift: #2e262e;
+      --bg-hover: #403840;
+      --text: #ecd9f2;
+      --text-soft: rgba(255, 255, 255, 0.3);
+      --primary: #b386d3;
+      --primary-hover: #c79fe3;
+      --success: #b7a6d9;
+      --link: #cdb0e8;
+      --radius: 4px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Hack', ui-monospace, monospace;
+      font-size: 12px;
+      -webkit-font-smoothing: antialiased;
+      display: flex; flex-direction: column;
+      overflow: hidden; user-select: none; cursor: default;
+    }
+
+    /* ---- slim top bar ---- */
+    header {
+      padding: 9px 12px;
+      display: flex; align-items: center; gap: 9px;
+    }
+    header .title { color: var(--primary); }
+    header .rom { color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    header .spacer { flex: 1; }
+    header .fps { color: var(--text-soft); font-variant-numeric: tabular-nums; }
+    header .fps.live { color: var(--success); }
+    header .badge {
+      color: var(--primary); font-size: 10px;
+      border: 1px solid var(--primary); border-radius: var(--radius);
+      padding: 1px 6px; display: none;
+    }
+    header .badge.on { display: inline-block; }
+
+    main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    #center { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; position: relative; }
+
+    /* ---- library home screen ---- */
+    #library {
+      display: flex; flex-direction: column; align-items: center; gap: 12px;
+      width: 100%; padding: 12px 24px; overflow-y: auto;
+    }
+    #library.hidden { display: none; }
+    #library svg { height: 110px; flex: none; }
+    #library .droptext { font-size: 17px; color: var(--text-soft); }
+    #library .grid {
+      display: grid; grid-template-columns: repeat(auto-fill, 96px); gap: 10px;
+      width: 100%; max-width: 560px; justify-content: center;
+    }
+    #library .card {
+      background: var(--bg-lift); border-radius: var(--radius);
+      padding: 10px 6px; text-align: center; cursor: pointer;
+      overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    }
+    #library .card:hover { background: var(--bg-hover); color: var(--primary-hover); }
+    #library .empty { color: var(--text-soft); grid-column: 1 / -1; text-align: center; padding: 6px 0 2px; }
+
+    /* ---- playing state ---- */
+    #bezel {
+      display: none;
+      padding: 12px; border-radius: var(--radius);
+      background: var(--bg-lift);
+    }
+    #bezel.visible { display: flex; }
+    body.dragging #bezel.visible { outline: 2px dashed var(--primary); outline-offset: 3px; }
+    canvas {
+      display: block; border-radius: var(--radius); background: #000;
+      image-rendering: pixelated; image-rendering: crisp-edges;
+    }
+
+    /* ---- in-game settings row (per-game + global, above actions) ---- */
+    #settings {
+      display: none; gap: 9px; padding: 0 12px 0;
+    }
+    #settings.visible { display: flex; }
+    #settings > * { flex: 1; }
+    select.sbutton { color: var(--text-soft); }
+    select.sbutton:hover { color: var(--text); }
+    select.sbutton option { background: var(--bg); color: var(--text); }
+
+    #links {
+      display: none; gap: 2px; justify-content: center; align-items: center;
+      padding: 0 12px;
+    }
+    #links.visible { display: flex; }
+    #links button {
+      background: none; border: 0; border-radius: var(--radius); padding: 4px 10px;
+      cursor: pointer; font: inherit; color: var(--text-soft);
+    }
+    #links button:hover { color: var(--text); background: var(--bg-lift); }
+    #links button.more { color: var(--link); }
+
+    /* ---- bottom action row ---- */
+    #actions { display: flex; gap: 9px; padding: 9px 12px 12px; }
+    #actions > * { flex: 1; }
+    .sbutton {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      background: var(--bg-lift); color: var(--text);
+      border: 0; border-radius: var(--radius);
+      padding: 9px; font: inherit; cursor: pointer;
+    }
+    .sbutton:hover { background: var(--bg-hover); }
+    .sbutton:active { background: var(--bg); }
+    .sbutton svg { width: 12px; height: 12px; fill: currentColor; }
+    select.sbutton {
+      appearance: none; -webkit-appearance: none;
+      justify-content: flex-start; cursor: pointer; outline: none;
+    }
+
+    /* ---- overlays ---- */
+    .overlay {
+      position: absolute; inset: 0;
+      background: rgba(40, 32, 40, 0.92);
+      display: none; flex-direction: column; align-items: center; justify-content: center;
+      gap: 12px; padding: 20px; z-index: 10;
+    }
+    .overlay.open { display: flex; }
+    .overlay h2 { font-size: 15px; color: var(--primary); font-weight: normal; }
+    .overlay .box {
+      width: min(430px, 100%); max-height: 100%;
+      overflow-y: auto;
+      background: var(--bg-lift); border-radius: var(--radius); padding: 14px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .overlay input[type=text] {
+      background: var(--bg); border: 1px solid var(--bg-hover); border-radius: var(--radius);
+      color: var(--text); font: inherit; padding: 8px; outline: none; width: 100%;
+    }
+    .overlay input[type=text]:focus { border-color: var(--primary); }
+    .overlay .row { display: flex; gap: 8px; }
+    .overlay .err { color: #e78a8a; min-height: 14px; font-size: 11px; }
+    .overlay .list { display: flex; flex-direction: column; gap: 6px; }
+    .overlay .cheat {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--bg); border-radius: var(--radius); padding: 7px 9px;
+    }
+    .overlay .cheat .code { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+    .overlay .cheat.off .code { color: var(--text-soft); text-decoration: line-through; }
+    .overlay .cheat button { background: none; border: 0; color: var(--text-soft); cursor: pointer; font: inherit; }
+    .overlay .cheat button:hover { color: var(--primary-hover); }
+    .overlay .kv { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .overlay .kv .k { color: var(--text-soft); }
+    .overlay .kv select {
+      background: var(--bg); color: var(--text); border: 1px solid var(--bg-hover);
+      border-radius: var(--radius); font: inherit; padding: 5px 8px; outline: none;
+    }
+    .overlay .bindrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .overlay .bindrow .k { color: var(--text-soft); }
+    .overlay .bindrow .keys { display: flex; gap: 4px; align-items: center; }
+    .overlay .bindrow button {
+      background: var(--bg); border: 1px solid var(--bg-hover); border-radius: var(--radius);
+      color: var(--text); font: inherit; padding: 4px 8px; cursor: pointer; min-width: 86px;
+    }
+    .overlay .bindrow button:hover { border-color: var(--primary); }
+    .overlay .bindrow button.listening { border-color: var(--primary); color: var(--primary); }
+    .overlay .more-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .overlay .more-grid .sbutton { font-size: 11px; }
+    /* overlay buttons sit on a lifted box, so they use the control surface */
+    .overlay .sbutton {
+      background: var(--bg); border: 1px solid var(--bg-hover);
+    }
+    .overlay .sbutton:hover { border-color: var(--primary); background: var(--bg); }
+    .overlay .sbutton:active { background: var(--bg-lift); }
+    .overlay .box.hidden { display: none; }
+    .overlay .hint { color: var(--text-soft); font-size: 11px; line-height: 1.6; }
+    .overlay .actions2 { display: flex; gap: 8px; }
+    .overlay .actions2 .sbutton { flex: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">PocketGB</div>
+    <div class="rom" id="rom-name"></div>
+    <div class="spacer"></div>
+    <span class="badge" id="turbo-badge" title="Fast-forward">FF</span>
+    <div class="fps" id="status">—</div>
+  </header>
+
+  <main>
+    <div id="center">
+      <div id="library">
+        <svg viewBox="0 0 160 144" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="34" y="4" width="92" height="136" rx="8" fill="#2e262e"/>
+          <rect x="34.75" y="4.75" width="90.5" height="134.5" rx="7.25" fill="none" stroke="#403840" stroke-width="1.5"/>
+          <rect x="46" y="16" width="68" height="56" rx="4" fill="#151317"/>
+          <rect x="50" y="20" width="60" height="44" rx="2" fill="#8fae52"/>
+          <rect x="50" y="20" width="60" height="4" fill="#a3c262" opacity="0.5"/>
+          <text x="80" y="45" font-family="Hack, monospace" font-size="9" fill="#3c4a24" text-anchor="middle">POCKETGB</text>
+          <path d="M56 92h10v-6h10v10h6v10H72v6H62v-6H50V96h6z" fill="#403840" transform="translate(0,-2)"/>
+          <circle cx="100" cy="98" r="7" fill="#b386d3"/>
+          <circle cx="114" cy="106" r="7" fill="#b386d3" opacity="0.75"/>
+          <g fill="#403840" transform="rotate(-25 122 128)">
+            <rect x="112" y="126" width="3" height="12" rx="1.5"/>
+            <rect x="117" y="126" width="3" height="12" rx="1.5"/>
+            <rect x="122" y="126" width="3" height="12" rx="1.5"/>
+          </g>
+        </svg>
+        <div class="droptext">drag and drop</div>
+        <div class="grid" id="library-grid"></div>
+      </div>
+
+      <div id="bezel">
+        <canvas id="screen" width="160" height="144"></canvas>
+      </div>
+
+      <!-- cheats overlay -->
+      <div class="overlay" id="ov-cheats">
+        <div class="box">
+          <h2>cheats</h2>
+          <div class="row">
+            <input type="text" id="cheat-input" placeholder="01XXXXYY or XXXYYYZZZ" spellcheck="false">
+          </div>
+          <div class="row">
+            <button class="sbutton" id="cheat-add">add</button>
+            <button class="sbutton" id="cheat-clear">clear all</button>
+          </div>
+          <div class="err" id="cheat-err"></div>
+          <div class="list" id="cheat-list"></div>
+          <div class="hint">GameShark codes edit RAM (01XXXXYY). Game Genie codes patch ROM (XXXYYY or XXXYYYZZZ with compare).</div>
+          <div class="actions2"><button class="sbutton" id="cheat-close">close</button></div>
+        </div>
+      </div>
+
+      <!-- effects overlay -->
+      <div class="overlay" id="ov-effects">
+        <div class="box">
+          <h2>display effects</h2>
+          <div class="kv"><span class="k">lcd ghosting</span><select id="fx-ghost">
+            <option value="off">off</option><option value="on">on</option></select></div>
+          <div class="kv"><span class="k">scanlines</span><select id="fx-scan">
+            <option value="off">off</option><option value="on">on</option></select></div>
+          <div class="hint">Ghosting mimics the DMG LCD's response time. Scanlines darken every other row.</div>
+          <div class="actions2"><button class="sbutton" id="fx-close">close</button></div>
+        </div>
+      </div>
+
+      <!-- debug overlay -->
+      <div class="overlay" id="ov-debug">
+        <div class="box">
+          <h2>debug</h2>
+          <div class="hint" id="debug-cpu" style="font-variant-numeric: tabular-nums; line-height: 1.7;"></div>
+          <div class="hint" id="debug-ppu" style="font-variant-numeric: tabular-nums; line-height: 1.7;"></div>
+          <div class="kv"><span class="k">VRAM tiles (bank 0, all 384)</span></div>
+          <canvas id="vram-view" width="384" height="128" style="width: 384px; image-rendering: pixelated; background: #151317;"></canvas>
+          <div class="actions2"><button class="sbutton" id="debug-close">close</button></div>
+        </div>
+      </div>
+
+      <!-- key bindings overlay -->
+      <div class="overlay" id="ov-keys">
+        <div class="box">
+          <h2>keyboard</h2>
+          <div id="bind-list"></div>
+          <div class="hint">Click a key, then press the new binding. Esc cancels. Keys are stored in the app.</div>
+          <div class="actions2">
+            <button class="sbutton" id="bind-reset">reset to defaults</button>
+            <button class="sbutton" id="keys-close">close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="settings">
+      <select class="sbutton" id="palette" title="Display palette">
+        <option value="dmg">dmg green</option>
+        <option value="pocket">pocket gray</option>
+        <option value="ember">ember</option>
+      </select>
+      <select class="sbutton" id="scale" title="Screen scale">
+        <option value="0">fit window</option>
+        <option value="1">1×</option>
+        <option value="2">2×</option>
+        <option value="3">3×</option>
+        <option value="4">4×</option>
+        <option value="5">5×</option>
+      </select>
+      <select class="sbutton" id="speed" title="Emulation speed">
+        <option value="1">100%</option>
+        <option value="1.5">150%</option>
+        <option value="2">200%</option>
+        <option value="4">400%</option>
+      </select>
+    </div>    <div id="links">
+      <button id="btn-pause">pause</button>
+      <button id="btn-mute">mute</button>
+      <button id="btn-more" class="more">more ⋯</button>
+    </div>
+
+    <!-- menu overlay -->
+    <div class="overlay" id="ov-menu">
+      <div class="box" id="menu-panel">
+        <h2>menu</h2>
+        <div class="more-grid">
+          <button class="sbutton" id="btn-library">library</button>
+          <button class="sbutton" id="btn-reset">reset</button>
+          <button class="sbutton" id="btn-cheats">cheats</button>
+          <button class="sbutton" id="btn-effects">effects</button>
+          <button class="sbutton" id="btn-keys">keys</button>
+          <button class="sbutton" id="btn-link">link cable</button>
+          <button class="sbutton" id="btn-shot">screenshot</button>
+          <button class="sbutton" id="btn-gif">record gif</button>
+          <button class="sbutton" id="btn-debug">debug</button>
+        </div>
+        <div class="hint">tab = fast-forward · backspace = rewind · gamepad supported</div>
+        <div class="actions2"><button class="sbutton" id="menu-close">close</button></div>
+      </div>
+
+      <!-- link cable panel (opens on top of the menu) -->
+      <div class="box hidden" id="link-panel">
+        <h2>link cable</h2>
+        <div class="hint">Two-player trades over localhost TCP (e.g. Pokémon trading). Run two PocketGB windows: one hosts, the other joins with the same port. Both must run the same game.</div>
+        <div class="row">
+          <input type="text" id="link-port" placeholder="port (blank = auto)" spellcheck="false">
+        </div>
+        <div class="row">
+          <button class="sbutton" id="link-host">host</button>
+          <button class="sbutton" id="link-join">join</button>
+          <button class="sbutton" id="link-stop">disconnect</button>
+        </div>
+        <div class="hint" id="link-status">not connected</div>
+        <div class="actions2">
+          <button class="sbutton" id="link-back">back</button>
+          <button class="sbutton" id="link-close">close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="actions">
+      <button class="sbutton" id="btn-open">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.6l3.3-3.3 1.4 1.4L12 16.4l-4.7-4.7 1.4-1.4L12 13.6V3zM5 19h14v2H5z"/></svg>
+        import rom
+      </button>
+    </div>
+  </main>
+<script src="src/ui/renderer.js"></script>
+<script src="src/ui/input.js"></script>
+<script src="src/ui/rewind.js"></script>
+<script src="src/ui/capture.js"></script>
+<script src="src/ui/debug.js"></script>
+<script src="src/ui/audio.js"></script>
+<script src="src/core/cpu.js"></script>
+<script src="src/core/mmu.js"></script>
+<script src="src/core/ppu.js"></script>
+<script src="src/core/apu.js"></script>
+<script src="src/core/timer.js"></script>
+<script src="src/core/joypad.js"></script>
+<script src="src/core/cartridge.js"></script>
+<script src="src/core/cheats.js"></script>
+<script src="src/core/serial.js"></script>
+<script src="src/core/gameboy.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

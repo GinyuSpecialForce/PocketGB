@@ -1,0 +1,17 @@
+{
+  "name": "pocketgb",
+  "version": "1.0.0",
+  "description": "Game Boy (DMG) emulator for macOS",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/",
+    "fetch-tests": "node test/fetch-blargg.js"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  }
+}
