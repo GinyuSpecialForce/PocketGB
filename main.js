@@ -223,11 +223,14 @@ app.whenReady().then(() => {
       fs.writeFileSync(p, Buffer.from(u8));
     } catch (err) { console.error('sav write failed', err); }
   });
-  ipcMain.on('write-state', (e, statePath, u8) => {
+  ipcMain.on('write-state', (e, statePath, u8, thumbB64) => {
     try {
       const p = path.isAbsolute(statePath) ? statePath : path.join(statesDir(), path.basename(statePath));
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, Buffer.from(u8));
+      if (typeof thumbB64 === 'string' && thumbB64.length) {
+        fs.writeFileSync(p + '.png', Buffer.from(thumbB64, 'base64'));
+      }
     } catch (err) { console.error('state write failed', err); }
   });
   ipcMain.handle('read-sav', (e, savePath) => {
@@ -242,11 +245,72 @@ app.whenReady().then(() => {
       return fs.readFileSync(p).buffer.slice(0);
     } catch { return null; }
   });
+  // ---- library management ----
+  // removeRomFromRecent(path): drops the entry from both recent stores.
+  // Returns true if anything was removed.
+  function removeRomFromRecent(romPath) {
+    const recent = readRecent().filter(r => r.path !== romPath);
+    const before = readRecent().length;
+    fs.writeFileSync(path.join(userDir(), 'recent.json'), JSON.stringify(recent));
+    writeSetting('recent', recent.slice(0, 12));
+    buildMenu(); // refresh the File > Open Recent submenu
+    return recent.length !== before;
+  }
+
+  // deleteGameData(romPath): best-effort removal of every artifact derived
+  // from this ROM — battery .sav, all save-states, all state thumbnails.
+  function deleteGameData(romPath) {
+    const key = romKey(romPath);
+    const removed = { sav: 0, states: 0 };
+    try {
+      const sav = path.join(savesDir(), key + '.sav');
+      if (fs.existsSync(sav)) { fs.unlinkSync(sav); removed.sav = 1; }
+    } catch { /* best-effort */ }
+    try {
+      for (const f of fs.readdirSync(statesDir())) {
+        if (f.startsWith(key) && (f.endsWith('.state') || f.endsWith('.state.png'))) {
+          try { fs.unlinkSync(path.join(statesDir(), f)); removed.states++; } catch { }
+        }
+      }
+    } catch { /* best-effort */ }
+    return removed;
+  }
+
+  ipcMain.handle('delete-rom', (e, romPath) => {
+    if (typeof romPath !== 'string' || !path.isAbsolute(romPath)) return { ok: false, reason: 'bad path' };
+    const gameFiles = deleteGameData(romPath);
+    const removed = removeRomFromRecent(romPath);
+    // If the deleted game is currently running, close it back to the library.
+    if (currentRom && currentRom.path === romPath && win && !win.isDestroyed()) {
+      currentRom = null;
+      win.loadFile('index.html');
+    }
+    return { ok: true, removed, removedFromList: removed };
+  });
+  ipcMain.handle('delete-saves', (e, romPath) => {
+    if (typeof romPath !== 'string' || !path.isAbsolute(romPath)) return { ok: false, reason: 'bad path' };
+    const removed = deleteGameData(romPath);
+    return { ok: true, removed };
+  });
+
+  ipcMain.handle('read-thumbnail', (e, statePath) => {
+    try {
+      const p = path.isAbsolute(statePath) ? statePath : path.join(statesDir(), path.basename(statePath));
+      const buf = fs.readFileSync(p + '.png');
+      return buf.toString('base64');
+    } catch { return null; }
+  });
   ipcMain.handle('list-states', (e, key) => {
     try {
       const d = statesDir();
       return fs.readdirSync(d).filter(f => f.startsWith(key) && f.endsWith('.state'))
-        .map(f => ({ slot: parseInt(f.slice(key.length + 1), 10), file: f }));
+        .map(f => {
+          const slot = parseInt(f.slice(key.length + 1), 10);
+          let mtime = 0, hasThumb = false;
+          try { mtime = fs.statSync(path.join(d, f)).mtimeMs; } catch { }
+          try { hasThumb = fs.existsSync(path.join(d, f + '.png')); } catch { }
+          return { slot, file: f, mtime, hasThumb };
+        });
     } catch { return []; }
   });
 

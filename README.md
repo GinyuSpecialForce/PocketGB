@@ -37,7 +37,7 @@ Drop a `.gb` or `.gbc` ROM onto the window, or use **File → Open ROM…** (<kb
 | [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (PPU, DMG) | ✅ **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real DMG hardware |
 | [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) (PPU, Color) | ✅ **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real Game Boy Color hardware |
 | [Blargg `cpu_instrs`](https://github.com/retrio/gb-test-roms) (CPU) | ✅ **11 / 11** individual tests pass |
-| Project test suite | ✅ 35 tests (CPU ops & flags, MBC banking, timer, PPU rendering, CGB memory/palette/DMA/speed, save states, smoke ROM) |
+| Project test suite | ✅ 46 tests (CPU ops & flags, MBC banking, timer, PPU rendering, CGB memory/palette/DMA/speed, save states, GIF encoders, smoke ROM) |
 
 <details>
 <summary>How the PPU stays accurate</summary>
@@ -62,11 +62,11 @@ the CPU keeps running.
 - **Gamepad support** — Gamepad API, standard mapping, merged with keyboard input
 - **Fast-forward & rewind** — hold <kbd>Tab</kbd> to fast-forward, <kbd>Backspace</kbd> to rewind (rolling save-state buffer)
 - **Cheats** — GameShark (`01XXXXYY`) and Game Genie (`XXXYYY[ZZZ]`), persisted per game
-- **LCD effects** — LCD ghosting and scanlines, toggleable and persisted
-- **ROM library** — home screen with recent ROMs, one click to relaunch
+- **LCD effects** — LCD ghosting, scanlines, a WebGL shader (subpixel LCD grid + optional screen curvature), all toggleable and persisted
+- **ROM library** — home screen with recent ROMs, one click to relaunch; cards show the newest save-state thumbnail as cover art
 - **Remappable input** — keyboard bindings with a press-to-rebind editor
 - **Per-game settings** — palette, scale, and cheats remembered per ROM
-- **Capture** — PNG screenshots on both DMG and CGB; GIF capture of the last/next ~10 seconds on DMG (color games not yet supported for GIF)
+- **Capture** — PNG screenshots on both DMG and CGB; animated GIF capture on both (4-color for DMG, full 256-color palette with median-cut quantization for CGB); WebM video recording (canvas + game audio) via MediaRecorder
 - **Debug overlay** — CPU/PPU registers, next-instruction hint, VRAM tile viewer
 - **Link cable** — two PocketGB windows over localhost TCP (host/join), for Pokémon trades and other serial-exchange games
 - **Convenience** — Recent ROMs menu, drag-and-drop from anywhere in the window, pause (<kbd>⌘P</kbd>), mute (<kbd>⌘M</kbd>), reset (<kbd>⌘R</kbd>)
@@ -138,10 +138,10 @@ Saves, save states, and the recent-ROMs list live under Electron's `userData` di
 ## 🗺️ Roadmap
 
 - [x] Game Boy Color (CGB) emulation
-- [ ] CGB GIF capture (BGR555-aware GIF encoder)
-- [ ] Shaders (subpixel LCD grid, curvature) on top of the existing effects pipeline
-- [ ] WebM/video capture alongside GIF
-- [ ] Save-state thumbnails in the library
+- [x] CGB GIF capture (BGR555-aware GIF encoder)
+- [x] Shaders (subpixel LCD grid, curvature) on top of the existing effects pipeline
+- [x] WebM/video capture alongside GIF
+- [x] Save-state thumbnails in the library
 
 ---
 

@@ -272,9 +272,20 @@ function setMuted(m) {
 function statePath(slot) {
   return `${romInfo.statesDir}/${romInfo.statesKey}.${slot}.state`;
 }
+// Downscale the presented canvas to a 160×144 PNG for the state picker.
+function makeThumbnail() {
+  try {
+    const c = document.createElement('canvas');
+    c.width = 160; c.height = 144;
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(elCanvas, 0, 0, 160, 144);
+    return c.toDataURL('image/png').split(',')[1];
+  } catch { return null; }
+}
 function doSaveState(slot) {
   if (!romLoaded) return;
-  window.pocketgb.writeState(statePath(slot), gb.saveState());
+  window.pocketgb.writeState(statePath(slot), gb.saveState(), makeThumbnail());
   setStatus(`state ${slot} saved`);
 }
 async function doLoadState(slot) {
@@ -305,12 +316,62 @@ async function showLibrary() {
     elLibGrid.appendChild(d);
     return;
   }
+  // Same key derivation as main.js's romKey(): base64url of the lowercased path.
+  function statesKeyFor(p) {
+    try {
+      return btoa(p.toLowerCase()).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    } catch { return null; } // non-latin1 path: no thumbnails, plain card
+  }
   for (const r of recent.slice(0, 12)) {
     const card = document.createElement('div');
     card.className = 'card';
-    card.textContent = r.title || r.path.split('/').pop();
     card.title = r.path;
     card.addEventListener('click', () => window.pocketgb.openRomPath(r.path));
+    // hover actions: clear saves / remove from library (clicking them must not open the game)
+    const actions = document.createElement('div');
+    actions.className = 'card-actions';
+    const trashBtn = document.createElement('button');
+    trashBtn.textContent = '🗑';
+    trashBtn.title = 'Delete this game\'s saves and save-states';
+    trashBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openDeleteConfirm({ mode: 'saves', entry: r });
+    });
+    const xBtn = document.createElement('button');
+    xBtn.textContent = '✕';
+    xBtn.title = 'Remove from library (keeps the ROM file on disk)';
+    xBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openDeleteConfirm({ mode: 'rom', entry: r });
+    });
+    actions.appendChild(trashBtn);
+    actions.appendChild(xBtn);
+    card.appendChild(actions);
+    // cover art: the newest save-state thumbnail for this game, if any
+    const key = statesKeyFor(r.path);
+    let thumbB64 = null;
+    if (key) {
+      try {
+        const states = await window.pocketgb.listStates(key);
+        const best = states.filter((s) => s.hasThumb).sort((a, b) => b.mtime - a.mtime)[0];
+        if (best) thumbB64 = await window.pocketgb.readThumbnail(`${key}.${best.slot}.state`);
+      } catch { /* thumbnail is optional */ }
+    }
+    if (thumbB64) {
+      const img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = `data:image/png;base64,${thumbB64}`;
+      card.appendChild(img);
+    } else {
+      const ph = document.createElement('div');
+      ph.className = 'thumb';
+      ph.textContent = 'no save';
+      card.appendChild(ph);
+    }
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = r.title || r.path.split('/').pop();
+    card.appendChild(label);
     elLibGrid.appendChild(card);
   }
 }
@@ -320,6 +381,47 @@ function showScreen(visible) {
   elSettings.classList.toggle('visible', visible);
   elLinks.classList.toggle('visible', visible);
   if (visible) resizeCanvas();
+}
+
+// ---- library deletion (two-step confirm) ----
+let pendingDelete = null;
+function openDeleteConfirm({ mode, entry }) {
+  pendingDelete = { mode, entry };
+  const title = $('del-title');
+  const text = $('del-text');
+  const yes = $('del-yes');
+  const name = entry.title || entry.path.split('/').pop();
+  if (mode === 'rom') {
+    title.textContent = `remove "${name}"?`;
+    text.textContent = 'The game disappears from your recent list and won\'t show up when you run PocketGB. Its saves and save-states are deleted too. The ROM file itself stays on disk.';
+    yes.textContent = 'remove';
+  } else {
+    title.textContent = `delete saves for "${name}"?`;
+    text.textContent = 'Deletes the battery save and every save-state (including their thumbnails) for this game. The game stays in your library.';
+    yes.textContent = 'delete saves';
+  }
+  $('ov-del').classList.add('open');
+}
+function closeDeleteConfirm() {
+  pendingDelete = null;
+  $('ov-del').classList.remove('open');
+}
+async function confirmDelete() {
+  if (!pendingDelete) { closeDeleteConfirm(); return; }
+  const { mode, entry } = pendingDelete;
+  const res = (mode === 'rom')
+    ? await window.pocketgb.deleteRom(entry.path)
+    : await window.pocketgb.deleteSaves(entry.path);
+  closeDeleteConfirm();
+  if (!res || !res.ok) { setStatus('delete failed'); return; }
+  if (mode === 'rom') {
+    const n = res.removed ? (res.removed.sav + res.removed.states) : 0;
+    setStatus(n ? `removed — deleted ${n} save file${n === 1 ? '' : 's'}` : 'removed from library');
+  } else {
+    const n = res.removed ? (res.removed.sav + res.removed.states) : 0;
+    setStatus(`deleted ${n} save file${n === 1 ? '' : 's'}`);
+  }
+  showLibrary(); // refresh the grid in place
 }
 
 // ---- cheats UI ----
@@ -384,13 +486,20 @@ function addCheat() {
 
 // ---- effects UI ----
 async function initEffects() {
-  const fx = await loadSetting('effects', { ghosting: false, scanlines: false });
+  const fx = await loadSetting('effects', { ghosting: false, scanlines: false, shader: false, curvature: false });
   $('fx-ghost').value = fx.ghosting ? 'on' : 'off';
   $('fx-scan').value = fx.scanlines ? 'on' : 'off';
+  $('fx-shader').value = fx.shader ? 'on' : 'off';
+  $('fx-curve').value = fx.curvature ? 'on' : 'off';
   renderer.setEffects(fx);
 }
 function saveEffects() {
-  const fx = { ghosting: $('fx-ghost').value === 'on', scanlines: $('fx-scan').value === 'on' };
+  const fx = {
+    ghosting: $('fx-ghost').value === 'on',
+    scanlines: $('fx-scan').value === 'on',
+    shader: $('fx-shader').value === 'on',
+    curvature: $('fx-curve').value === 'on',
+  };
   renderer.setEffects(fx);
   saveSetting('effects', fx);
 }
@@ -501,6 +610,8 @@ $('btn-reset').addEventListener('click', resetGame);
 $('btn-pause').addEventListener('click', () => setPaused(!paused));
 $('btn-mute').addEventListener('click', () => setMuted(!muted));
 $('btn-library').addEventListener('click', showLibrary);
+$('del-yes').addEventListener('click', confirmDelete);
+$('del-no').addEventListener('click', closeDeleteConfirm);
 $('btn-cheats').addEventListener('click', () => toggleOverlay('ov-cheats'));
 $('btn-effects').addEventListener('click', () => toggleOverlay('ov-effects'));
 $('btn-keys').addEventListener('click', () => toggleOverlay('ov-keys'));
@@ -529,6 +640,24 @@ $('btn-gif').addEventListener('click', () => {
   if (gifRecording) capture.startGif();
   else capture.stopGif();
 });
+
+// webm: record video+audio going forward via MediaRecorder
+let webmRecording = false;
+$('btn-webm').addEventListener('click', () => {
+  if (!webmRecording) {
+    const track = audio.getRecordingTrack();
+    if (capture.startWebm(track ? [track] : null)) {
+      webmRecording = true;
+      $('btn-webm').textContent = 'stop video';
+    } else {
+      setStatus('video capture unavailable');
+    }
+  } else {
+    webmRecording = false;
+    $('btn-webm').textContent = 'record video';
+    capture.stopWebm();
+  }
+});
 $('cheat-add').addEventListener('click', addCheat);
 $('cheat-clear').addEventListener('click', () => { gb.cheats.clear(); persistCheats(); renderCheatList(); });
 $('cheat-close').addEventListener('click', () => toggleOverlay('ov-cheats'));
@@ -538,6 +667,8 @@ $('bind-reset').addEventListener('click', () => { input.setBindings(DEFAULT_BIND
 $('cheat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') addCheat(); });
 $('fx-ghost').addEventListener('change', saveEffects);
 $('fx-scan').addEventListener('change', saveEffects);
+$('fx-shader').addEventListener('change', saveEffects);
+$('fx-curve').addEventListener('change', saveEffects);
 
 elPalette.addEventListener('change', () => { applyPalette(); saveSetting('palette', elPalette.value); });
 elScale.addEventListener('change', () => { resizeCanvas(); saveSetting('scale', Number(elScale.value)); });
@@ -577,6 +708,17 @@ function hashName(name) {
 window.addEventListener('resize', resizeCanvas);
 
 // ---- boot ----
+// automated-probe hook (inert in production: nothing reads window.probeHook)
+window.probeHook = {
+  showLibrary,
+  showScreen: () => showScreen(false),
+  getRecent: async () => (await window.pocketgb.getSettings()).recent || [],
+  statePath,
+  doSaveState,
+  openDeleteConfirm,
+  closeDeleteConfirm,
+  confirmDelete,
+};
 (async () => {
   await initSettings();
   await initEffects();

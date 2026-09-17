@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' blob:; img-src 'self' data:">
   <title>PocketGB</title>
   <style>
     /* Impactor (PlumeImpactor) design language, pastel purple edition. */
@@ -68,11 +68,33 @@
       width: 100%; max-width: 560px; justify-content: center;
     }
     #library .card {
+      position: relative;
       background: var(--bg-lift); border-radius: var(--radius);
-      padding: 10px 6px; text-align: center; cursor: pointer;
-      overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+      padding: 0 0 6px; text-align: center; cursor: pointer;
+      overflow: hidden; display: flex; flex-direction: column; align-items: center;
     }
+    /* per-card actions: remove-from-library (x) and clear-saves (trash) */
+    #library .card .card-actions {
+      position: absolute; top: 3px; right: 3px; display: none; gap: 2px; z-index: 2;
+    }
+    #library .card:hover .card-actions { display: flex; }
+    #library .card .card-actions button {
+      background: rgba(20, 16, 20, 0.85); border: 0; border-radius: 4px;
+      color: var(--text-soft); font: inherit; font-size: 10px; line-height: 1;
+      padding: 3px 4px; cursor: pointer;
+    }
+    #library .card .card-actions button:hover { color: var(--text); background: rgba(60, 40, 60, 0.9); }
+    #library .card .card-actions button.confirm { color: #ffb84d; }
     #library .card:hover { background: var(--bg-hover); color: var(--primary-hover); }
+    #library .card .thumb {
+      width: 96px; height: 86px; object-fit: cover; display: block;
+      image-rendering: pixelated; background: #151317; margin-bottom: 4px;
+    }
+    #library .card .label {
+      padding: 0 4px; max-width: 96px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; font-size: 11px;
+    }
+    #library .card.empty-thumb .thumb { display: flex; align-items: center; justify-content: center; color: var(--text-soft); font-size: 10px; }
     #library .empty { color: var(--text-soft); grid-column: 1 / -1; text-align: center; padding: 6px 0 2px; }
 
     /* ---- playing state ---- */
@@ -175,6 +197,8 @@
     .overlay .bindrow button.listening { border-color: var(--primary); color: var(--primary); }
     .overlay .more-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
     .overlay .more-grid .sbutton { font-size: 11px; }
+    .overlay .sbutton.danger { border-color: #7a4040; color: #ffb0b0; }
+    .overlay .sbutton.danger:hover { background: #3a2020; color: #ffd4d4; }
     /* overlay buttons sit on a lifted box, so they use the control surface */
     .overlay .sbutton {
       background: var(--bg); border: 1px solid var(--bg-hover);
@@ -249,7 +273,11 @@
             <option value="off">off</option><option value="on">on</option></select></div>
           <div class="kv"><span class="k">scanlines</span><select id="fx-scan">
             <option value="off">off</option><option value="on">on</option></select></div>
-          <div class="hint">Ghosting mimics the DMG LCD's response time. Scanlines darken every other row.</div>
+          <div class="kv"><span class="k">lcd shader (grid + subpixels)</span><select id="fx-shader">
+            <option value="off">off</option><option value="on">on</option></select></div>
+          <div class="kv"><span class="k">screen curvature</span><select id="fx-curve">
+            <option value="off">off</option><option value="on">on</option></select></div>
+          <div class="hint">Ghosting mimics the DMG LCD's response time. The shader adds a subpixel LCD grid and optional curvature (needs WebGL; falls back to plain 2D).</div>
           <div class="actions2"><button class="sbutton" id="fx-close">close</button></div>
         </div>
       </div>
@@ -263,6 +291,18 @@
           <div class="kv"><span class="k">VRAM tiles (bank 0, all 384)</span></div>
           <canvas id="vram-view" width="384" height="128" style="width: 384px; image-rendering: pixelated; background: #151317;"></canvas>
           <div class="actions2"><button class="sbutton" id="debug-close">close</button></div>
+        </div>
+      </div>
+
+      <!-- delete confirmation overlay -->
+      <div class="overlay" id="ov-del">
+        <div class="box">
+          <h2 id="del-title">remove from library?</h2>
+          <div class="hint" id="del-text">This clears the game from your recent list so it won't show up when you run PocketGB.</div>
+          <div class="actions2">
+            <button class="sbutton danger" id="del-yes">delete</button>
+            <button class="sbutton" id="del-no">cancel</button>
+          </div>
         </div>
       </div>
 
@@ -319,6 +359,7 @@
           <button class="sbutton" id="btn-link">link cable</button>
           <button class="sbutton" id="btn-shot">screenshot</button>
           <button class="sbutton" id="btn-gif">record gif</button>
+          <button class="sbutton" id="btn-webm">record video</button>
           <button class="sbutton" id="btn-debug">debug</button>
         </div>
         <div class="hint">tab = fast-forward · backspace = rewind · gamepad supported</div>

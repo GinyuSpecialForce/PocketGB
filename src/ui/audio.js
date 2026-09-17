@@ -124,6 +124,12 @@ class AudioManager {
     const workletOk = await this._startWorklet().catch(() => false);
     if (!workletOk) this._startScriptProcessor();
 
+    // Recording tap: the output node (worklet or ScriptProcessor) is an
+    // AudioNode, so a MediaStreamDestination branch carries exactly what's
+    // heard — for MediaRecorder video captures.
+    this.recDest = this.ctx.createMediaStreamDestination();
+    this.node.connect(this.recDest);
+
     // Safety net: the rAF pump can stall with the tab hidden or the main
     // thread jammed; a cheap interval keeps the ring fed. It no-ops when full.
     if (!this._pumpTimer) this._pumpTimer = setInterval(() => this.pump(), 8);
@@ -255,6 +261,12 @@ class AudioManager {
 
   resume() {
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+  }
+
+  // An audio MediaStreamTrack mirroring the output, for video recording.
+  getRecordingTrack() {
+    if (!this.recDest) return null;
+    return this.recDest.stream.getAudioTracks()[0] || null;
   }
 }
 
