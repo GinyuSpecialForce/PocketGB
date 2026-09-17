@@ -13,11 +13,13 @@ Validated against industry-standard hardware test suites.
 ![dmg-acid2](https://img.shields.io/badge/dmg_acid2-pixel_perfect-success)
 ![cgb-acid2](https://img.shields.io/badge/cgb_acid2-pixel_perfect-success)
 
+<img width="482" height="567" alt="Screen Shot 2026-09-17 at 7 16 56 AM" src="https://github.com/user-attachments/assets/595bc10b-cba5-4cdf-9bce-576263435c55" />
+
 </div>
 
 ---
 
-## 🚀 Getting started
+## Getting started
 
 Requires [Node.js](https://nodejs.org/) and npm.
 
@@ -30,14 +32,14 @@ Drop a `.gb` or `.gbc` ROM onto the window, or use **File → Open ROM…** (<kb
 
 ---
 
-## 🎯 Accuracy
+## Accuracy
 
 | Suite | Result |
 |---|---|
-| [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (PPU, DMG) | ✅ **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real DMG hardware |
-| [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) (PPU, Color) | ✅ **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real Game Boy Color hardware |
-| [Blargg `cpu_instrs`](https://github.com/retrio/gb-test-roms) (CPU) | ✅ **11 / 11** individual tests pass |
-| Project test suite | ✅ 46 tests (CPU ops & flags, MBC banking, timer, PPU rendering, CGB memory/palette/DMA/speed, save states, GIF encoders, smoke ROM) |
+| [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (PPU, DMG) | **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real DMG hardware |
+| [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) (PPU, Color) | **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real Game Boy Color hardware |
+| [Blargg `cpu_instrs`](https://github.com/retrio/gb-test-roms) (CPU) | **11 / 11** individual tests pass |
+| Project test suite | 46 tests (CPU ops & flags, MBC banking, timer, PPU rendering, CGB memory/palette/DMA/speed, save states, GIF encoders, smoke ROM) |
 
 <details>
 <summary>How the PPU stays accurate</summary>
@@ -52,7 +54,7 @@ the CPU keeps running.
 
 ---
 
-## ✨ Features
+## Features
 
 - **Emulation** — SM83 CPU (full base + CB instruction sets, HALT bug, interrupts), DMG PPU, 4-channel APU (2 pulse, wave, noise) with frame sequencer, DIV/TIMA timers, MBC1 / MBC3 (+ RTC) / MBC5 and ROM-only cartridges
 - **Game Boy Color** — full CGB mode: 32 KB banked WRAM, 16 KB banked VRAM with tile/map attributes, 8 BG + 8 OBJ palettes (32K colors), HDMA/GDMA transfers, double-speed mode (<kbd>STOP</kbd> + <kbd>KEY1</kbd>), BGR555 color output, and DMG-compatibility register behavior
@@ -73,7 +75,7 @@ the CPU keeps running.
 
 ---
 
-## 🎮 Controls
+## Controls
 
 | Key | Button |
 |---|---|
@@ -94,7 +96,7 @@ The core runs a full frame in **~1.9 ms** (≈ 517 fps cap, 8.6× realtime headr
 
 ---
 
-## 📁 Project layout
+## Project layout
 
 <details>
 <summary>Directory structure</summary>
@@ -118,7 +120,7 @@ The `src/core` layer is deliberately dependency-free: it loads both as browser g
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ```bash
 npm test             # unit tests + Blargg cpu_instrs + dmg-acid2 + cgb-acid2
@@ -129,13 +131,13 @@ The dmg-acid2 and cgb-acid2 tests run their ROMs headless until the screen stabi
 
 ---
 
-## 💾 Data locations
+## Data locations
 
 Saves, save states, and the recent-ROMs list live under Electron's `userData` directory: `~/Library/Application Support/pocketgb/` on macOS.
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
 - [x] Game Boy Color (CGB) emulation
 - [x] CGB GIF capture (BGR555-aware GIF encoder)
@@ -145,7 +147,7 @@ Saves, save states, and the recent-ROMs list live under Electron's `userData` di
 
 ---
 
-## 📝 Notes
+ Notes
 
 > [!NOTE]
 > CGB games run in full-color Game Boy Color mode; DMG games keep their classic look. A color game can still be forced into DMG mode from the ROM library settings.
