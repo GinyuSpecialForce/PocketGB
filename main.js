@@ -172,6 +172,7 @@ function buildMenu() {
     { label: 'Emulation', submenu: [
       { label: 'Pause', type: 'checkbox', accelerator: 'CmdOrCtrl+P', click: (mi) => send('pause', mi.checked) },
       { label: 'Mute', type: 'checkbox', accelerator: 'CmdOrCtrl+M', click: (mi) => send('mute', mi.checked) },
+      { label: 'Force DMG Mode (restarts ROM)', type: 'checkbox', click: (mi) => send('force-dmg', mi.checked) },
       { type: 'separator' },
       { label: 'Save State', submenu: [0,1,2,3,4,5,6,7,8,9].map(i => ({
           label: `Slot ${i}`, accelerator: isMac ? `Cmd+Shift+${i}` : `Ctrl+Shift+${i}`,

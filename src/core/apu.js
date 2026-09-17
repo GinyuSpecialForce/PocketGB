@@ -24,11 +24,11 @@ class APU {
     this.readPos = 0; this.writePos = 0;
     this.cycleAcc = 0;
     this.outputRate = this.outputRate || 44100; // survive APU power cycles
-    this.sampleEvery = 4194304 / this.outputRate / 4; // m-cycles per output sample
+    this.sampleEvery = 4194304 / this.outputRate; // T-cycles per output sample
 
     this.seqStep = 0;
     this.seqAcc = 0;
-    this.seqEvery = 2048; // 8192 T-cycles = 2048 m-cycles
+    this.seqEvery = 8192; // T-cycles (the frame sequencer steps every 8192 T-cycles)
 
     this.nr50 = 0x77; this.nr51 = 0xF3;
 
@@ -76,19 +76,35 @@ class APU {
     return true;
   }
 
+  // Drain up to n stereo frames into separate-channel buffers (AudioWorklet
+  // pump path). One call per block instead of per-sample closure overhead.
+  // Returns the number of frames actually pulled (0 = underrun).
+  pullBlock(outL, outR) {
+    const n = outL.length;
+    let avail = (this.writePos - this.readPos + RING_SIZE) & (RING_SIZE - 1);
+    const count = avail < n ? avail : n;
+    for (let i = 0; i < count; i++) {
+      outL[i] = this.ring[this.readPos * 2];
+      outR[i] = this.ring[this.readPos * 2 + 1];
+      this.readPos = (this.readPos + 1) & (RING_SIZE - 1);
+    }
+    return count;
+  }
+
   // Match sample generation to the audio device's actual rate (e.g. 48k on macOS).
   // Prevents a systematic underrun when the device rate differs from 44100.
   setOutputRate(rate) {
     if (!rate || rate === this.outputRate) return;
     this.outputRate = rate;
-    this.sampleEvery = 4194304 / rate / 4;
+    this.sampleEvery = 4194304 / rate;
   }
 
   // ---- main tick ----
-  // Channels only matter when they produce output samples (~every 23 m-cycles),
-  // so advance them in per-sample bursts instead of once per m-cycle.
-  tick(mCycles) {
-    let remaining = mCycles;
+  // Receives T-cycles (4.19 MHz master clock), matching the CPU/PPU. Channels
+  // only matter when they produce output samples (~every 95 T-cycles), so
+  // advance them in per-sample bursts instead of once per T-cycle.
+  tick(tCycles) {
+    let remaining = tCycles;
     const ch0 = this.ch[0], ch1 = this.ch[1], ch2 = this.ch[2], ch3 = this.ch[3];
     while (remaining > 0) {
       // distance to the next output sample boundary (sampleEvery is fractional)
@@ -100,7 +116,10 @@ class APU {
         this.advanceChannel(ch2, n);
         this.advanceChannel(ch3, n);
         this.seqAcc += n;
-        while (this.seqAcc >= this.seqEvery) { this.seqAcc -= this.seqEvery; this.frameSequencer(); }
+        // epsilon: seqAcc sums fractional chunk sizes, so exact multiples of
+        // seqEvery can land a few ulps short — don't defer the step to a
+        // later tick because of float representation.
+        while (this.seqAcc >= this.seqEvery - 1e-6) { this.seqAcc -= this.seqEvery; this.frameSequencer(); }
       }
       this.cycleAcc += n;
       remaining -= n;
@@ -112,11 +131,11 @@ class APU {
     }
   }
 
-  // Advance channel phase counters by n m-cycles.
+  // Advance channel phase counters by n T-cycles.
   advanceChannel(c, n) {
     if (c === this.ch[3]) {
-      // Noise: LFSR shifts at 524288 Hz / divisor → divisor × 8 T-cycles = div×2 m-cycles
-      const period = NOISE_DIV[c.divCode] * 2;
+      // Noise: LFSR shifts at 524288 Hz / divisor → divisor × 8 T-cycles
+      const period = NOISE_DIV[c.divCode] * 8;
       c.timer += n;
       while (c.timer >= period) {
         c.timer -= period;
@@ -127,7 +146,7 @@ class APU {
       return;
     }
     if (c !== this.ch[2]) {
-      // Pulse: one duty step every (2048 - freq) m-cycles (f = 131072/(2048-n) Hz)
+      // Pulse: one duty step every (2048 - freq) T-cycles (f = 131072/(2048-n) Hz)
       const p = Math.max(1, 2048 - c.freq);
       c.timer += n;
       while (c.timer >= p) {
@@ -135,8 +154,8 @@ class APU {
         c.dutyPos = (c.dutyPos + 1) & 7;
       }
     } else {
-      // Wave: one of 32 samples every (2048 - freq)/2 m-cycles (f = 65536/(2048-n) Hz)
-      const p = Math.max(1, Math.floor((2048 - c.freq) / 2));
+      // Wave: one of 32 samples every (2048 - freq)×2 T-cycles (f = 65536/(2048-n) Hz)
+      const p = Math.max(1, Math.floor((2048 - c.freq) * 2));
       c.timer += n;
       while (c.timer >= p) {
         c.timer -= p;
@@ -164,7 +183,7 @@ class APU {
   tickChannel(c) {
     if (c === this.ch[3]) { this.tickNoise(c); return; }
     if (c !== this.ch[2]) {
-      // Pulse: one duty step every (2048 - freq) m-cycles (f = 131072/(2048-n) Hz)
+      // Pulse: one duty step every (2048 - freq) T-cycles (f = 131072/(2048-n) Hz)
       const p = Math.max(1, 2048 - c.freq);
       c.timer++;
       if (c.timer >= p) {
@@ -172,8 +191,8 @@ class APU {
         c.dutyPos = (c.dutyPos + 1) & 7;
       }
     } else {
-      // Wave: one of 32 samples every (2048 - freq)/2 m-cycles (f = 65536/(2048-n) Hz)
-      const p = Math.max(1, Math.floor((2048 - c.freq) / 2));
+      // Wave: one of 32 samples every (2048 - freq)×2 T-cycles (f = 65536/(2048-n) Hz)
+      const p = Math.max(1, Math.floor((2048 - c.freq) * 2));
       c.timer++;
       if (c.timer >= p) {
         c.timer = 0;
@@ -218,7 +237,7 @@ class APU {
 
   tickNoise(c) {
     const div = [8, 16, 32, 48, 64, 80, 96, 112][c.divCode];
-    const period = div / 32; // divisor × 8 T-cycles = div/32 m-cycles
+    const period = div * 8; // divisor × 8 T-cycles
     c.timer++;
     if (c.timer >= period) {
       c.timer -= period;

@@ -59,11 +59,27 @@ class Renderer {
     c.putImageData(img, 0, 0);
   }
 
-  blit(fb) {
+  // fb is either a shade-index buffer (DMG, 1 byte/pixel) or a BGR555 color
+  // buffer (CGB, 1 uint32/pixel). Blends ghosting with the previous frame.
+  blit(fb, isColor) {
     if (!fb) return;
     if (!this.px) this.px = new Uint32Array(this.imageData.data.buffer);
     const px = this.px;
-    if (this.effects.ghosting && this.prevPx) {
+    const ghost = this.effects.ghosting && this.prevPx;
+    if (isColor) {
+      if (ghost) {
+        const g = this.ghostStrength, ig = 1 - g, prev = this.prevPx;
+        for (let i = 0; i < px.length; i++) {
+          const cur = rgb555to888(fb[i]), old = prev[i];
+          const r = (((cur & 0xFF) * ig + (old & 0xFF) * g) | 0);
+          const gc = ((((cur >>> 8) & 0xFF) * ig + ((old >>> 8) & 0xFF) * g) | 0);
+          const b = ((((cur >>> 16) & 0xFF) * ig + ((old >>> 16) & 0xFF) * g) | 0);
+          px[i] = 0xFF000000 | (b << 16) | (gc << 8) | r;
+        }
+      } else {
+        for (let i = 0; i < px.length; i++) px[i] = rgb555to888(fb[i]);
+      }
+    } else if (ghost) {
       // Mix each channel with the previous frame (LCD response-time ghosting).
       const g = this.ghostStrength;
       const ig = 1 - g;
@@ -103,6 +119,13 @@ class Renderer {
     this.octx.putImageData(this.imageData, 0, 0);
     this.present();
   }
+}
+
+// Expand BGR555 to an xRGB888 canvas pixel (little-endian ABGR packing)
+function rgb555to888(c) {
+  const r5 = c & 0x1F, g5 = (c >> 5) & 0x1F, b5 = (c >> 10) & 0x1F;
+  const r = (r5 << 3) | (r5 >> 2), g = (g5 << 3) | (g5 >> 2), b = (b5 << 3) | (b5 >> 2);
+  return 0xFF000000 | (b << 16) | (g << 8) | r;
 }
 
 if (typeof module !== 'undefined') module.exports = { Renderer, DMG_PALETTE };

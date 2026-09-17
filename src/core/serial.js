@@ -14,8 +14,8 @@
 // byte lands in SB, our byte goes out.
 'use strict';
 
-const MCYCLES_PER_TRANSFER = 8 * 128; // 1024: 8 bits at 8192 Hz
-const REPLY_TIMEOUT = 70224;          // one frame: treat silence as no cable
+const TCYCLES_PER_TRANSFER = 8 * 512; // 4096 T-cycles: 8 bits at 8192 Hz
+const REPLY_TIMEOUT = 280896;         // one frame (70224 m-cycles) in T-cycles: treat silence as no cable
 
 const ST_IDLE = 0, ST_MASTER_RUN = 1, ST_MASTER_WAIT = 2;
 
@@ -24,7 +24,7 @@ class Serial {
     this.sb = 0x00;            // FF01
     this.sc = 0x7E;            // FF02 (bits 6..1 read as 1 on DMG)
     this._state = ST_IDLE;
-    this._counter = 0;         // m-cycles to the next state transition
+    this.  _counter = 0;              // T-cycles to the next state transition
     this._armed = false;       // slave transfer waiting for the peer's clock
     this._pendingPeer = null;  // peer byte received during the master transfer
     // transport hooks (set by the UI layer)
@@ -51,9 +51,9 @@ class Serial {
     this.sc = (v & 0x81) | 0x7E; // keep Start + ClockSpeed; DMG reads 1 elsewhere
     if (this.sc & 0x80) {
       if (this.sc & 0x01) {
-        // internal clock: shift 8 bits over 1024 m-cycles
+        // internal clock: shift 8 bits over 4096 T-cycles
         this._state = ST_MASTER_RUN;
-        this._counter = MCYCLES_PER_TRANSFER;
+        this._counter = TCYCLES_PER_TRANSFER;
         this._armed = false;
       } else {
         // external clock: wait for the peer's clock (transport delivery)
@@ -70,9 +70,9 @@ class Serial {
     }
   }
 
-  tick(mCycles) {
+  tick(tCycles) {
     if (this._state === ST_MASTER_RUN) {
-      this._counter -= mCycles;
+      this._counter -= tCycles;
       if (this._counter <= 0) {
         const out = this.sb;
         this._pendingPeer = null;
@@ -81,7 +81,7 @@ class Serial {
         else { this._state = ST_MASTER_WAIT; this._counter = REPLY_TIMEOUT; }
       }
     } else if (this._state === ST_MASTER_WAIT) {
-      this._counter -= mCycles;
+      this._counter -= tCycles;
       if (this._counter <= 0) this._complete(0xFF); // no reply: like no cable
     }
   }

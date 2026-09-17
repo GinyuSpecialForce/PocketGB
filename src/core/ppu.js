@@ -331,8 +331,8 @@ class PPU {
       bottomY = (y - objY - 16) & 7;
       if (h16 && y - objY >= -8) tileOffset++;
     }
-    if (h16 && (tile & 1)) tileOffset--;
-    const objTile = tile + tileOffset;
+    // 8x16 mode ignores tile bit 0: the pair is (tile & 0xFE, +1).
+    const objTile = (h16 ? (tile & 0xFE) : tile) + tileOffset;
     const base = objTile * 16 + bottomY * 2;
     const lo = vram[base], hi = vram[base + 1];
 

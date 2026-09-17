@@ -21,7 +21,17 @@ class Capture {
   status(msg) { if (this.onStatus) this.onStatus(msg); }
 
   // Rolling history for "record last N seconds" — call once per presented frame.
-  observe(fb) {
+  // CGB frames (BGR555 Uint32Array) don't fit the 4-color shade-index GIF path,
+  // so recording is declined with a status message rather than encoding garbage.
+  observe(fb, isColor) {
+    if (isColor) {
+      if (this.recording) {
+        this.recording = false;
+        this.recorded = [];
+        this.status('gif recording unsupported for color games');
+      }
+      return;
+    }
     const now = performance.now();
     if (now - this._lastCapture < 16.6) return;
     this._lastCapture = now;
@@ -43,6 +53,7 @@ class Capture {
   }
 
   startGif() {
+    // can't know isColor at toggle time reliably — accepted, checked per-frame in observe()
     this.recording = true;
     this.recorded = this.frames.slice(-60); // include the last second
     this.status('recording…');

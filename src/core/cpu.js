@@ -18,6 +18,9 @@ class CPU {
     this.ime = false; this.imeDelay = false; // imeDelay: EI takes effect after next instruction
     this.halted = false; this.haltBug = false;
     this.stopped = false;
+    // CGB double-speed state (unused on DMG)
+    this.doubleSpeed = false;      // CGB KEY1 bit 7
+    this.speedSwitchArmed = false; // CGB KEY1 bit 0
   }
 
   // ---- register pair helpers ----
@@ -149,6 +152,7 @@ class CPU {
   checkInterrupts() {
     const pending = this.mmu.ie & this.mmu.if & 0x1F;
     if (pending === 0) return 0;
+    if (this.stopped) this.stopped = false; // any enabled interrupt wakes STOP
     if (this.halted) this.halted = false; // interrupts always wake HALT...
     if (!this.ime) return 0;              // ...but are only serviced when IME is set
     this.halted = false;
@@ -180,6 +184,21 @@ class CPU {
 
     const op = this.fetch();
     return this.exec(op);
+  }
+
+  // STOP: on CGB with KEY1 bit 0 armed, this toggles double-speed and
+  // execution continues (the switch costs ~4.4k T-cycles on hardware; a few
+  // m-cycles here). Otherwise the CPU stops until a joypad interrupt.
+  execStop() {
+    const m = this.mmu;
+    if (m && m.cgb && this.speedSwitchArmed) {
+      this.speedSwitchArmed = false;
+      this.doubleSpeed = !this.doubleSpeed;
+      return 8;
+    }
+    this.stopped = true;
+    this.halted = true;
+    return 4;
   }
 
   exec(op) {
@@ -349,7 +368,7 @@ class CPU {
         else this.halted = true;
         return 4;
       }
-      case 0x10: this.fetch(); this.stopped = true; this.halted = true; return 4; // STOP (wake on joypad int)
+      case 0x10: return this.execStop(); // STOP / CGB speed switch
       case 0xFB: this.imeDelay = true; return 4; // EI
       case 0xF3: this.ime = false; return 4;     // DI
       case 0x37: this.f = (this.f & F_Z) | F_C; return 4; // SCF

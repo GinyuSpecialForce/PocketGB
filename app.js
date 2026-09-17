@@ -13,6 +13,7 @@ const apu = gb.apu;
 let romInfo = null;
 let paused = false;
 let muted = false;
+let forceDmg = false; // menu toggle: run CGB games in classic DMG mode
 let romLoaded = false;
 let turbo = false;
 let rewinding = false;
@@ -129,10 +130,12 @@ function loop(t) {
   requestAnimationFrame(loop);
   if (!romLoaded || paused) { lastFrameTime = t; return; }
 
+  audio.pump(); // keep the audio thread's ring fed regardless of pacing below
+
   if (rewinding) {
     // ~15 steps/sec while held, paced independently of frame production
     if (rewind.step()) {
-      renderer.blit(gb.ppu.framebuffer);
+      renderer.blit(gb.ppu.colorFramebuffer || gb.ppu.framebuffer, gb.mmu.cgb);
       renderer.present();
       setStatus('rewinding');
     } else setStatus('start of rewind buffer');
@@ -142,16 +145,22 @@ function loop(t) {
   if (t - lastFrameTime < FRAME_MS / speed - 1.5) return;
   lastFrameTime = Math.min(t, lastFrameTime + FRAME_MS / speed);
 
+  // Produce one frame per pacing tick minimum; produce extra frames in a
+  // burst only while the audio buffer has room. The audio gate must never be
+  // able to starve video: if the audio context is suspended or drains slowly,
+  // the ring stays full — skipping production on that alone crawls at ~16 fps
+  // (audio callbacks only fire 60–75×/s, never several times per video tick).
   const maxFrames = speed >= 4 ? 4 : speed >= 2 ? 2 : 1;
-  for (let i = 0; i < maxFrames; i++) {
-    if (apu.available() > (apu.outputRate || 44100) * (turbo ? 0.02 : 0.15)) break; // latency cap
+  const rate = apu.outputRate || 44100;
+  const burst = audio.buffered() < rate * (turbo ? 0.02 : 0.15) ? maxFrames : 1;
+  for (let i = 0; i < burst; i++) {
     const fb = gb.runFrame();
     if (fb) {
       framesThisSecond++;
-      if (i === maxFrames - 1) { // present the last frame of the burst
-        renderer.blit(fb);
+      if (i === burst - 1) { // present the last frame of the burst
+        renderer.blit(fb, gb.mmu.cgb);
         renderer.present();
-        capture.observe(fb);
+        capture.observe(fb, gb.mmu.cgb);
       }
     }
   }
@@ -198,7 +207,7 @@ async function loadRom(info) {
   romInfo = info;
   const romBytes = new Uint8Array(info.bytes);
   const savData = info.savePath ? await window.pocketgb.readSav(info.savePath) : null;
-  gb.loadROM(romBytes, savData ? new Uint8Array(savData) : null);
+  gb.loadROM(romBytes, savData ? new Uint8Array(savData) : null, forceDmg);
   romLoaded = true;
   paused = false;
   rewinding = false;
@@ -241,7 +250,7 @@ function resetGame() {
   if (!romLoaded) return;
   const romBytes = gb.cart.rom;
   const sav = gb.cart.battery ? gb.cart.serializeSav() : null;
-  gb.loadROM(romBytes, sav);
+  gb.loadROM(romBytes, sav, forceDmg);
   rewind.reset();
   setStatus('reset');
 }
@@ -478,6 +487,10 @@ window.pocketgb.onRomOpened((info) => loadRom(info));
 window.pocketgb.onReset(() => resetGame());
 window.pocketgb.onPause((p) => setPaused(p));
 window.pocketgb.onMute((m) => setMuted(m));
+window.pocketgb.onForceDmg((on) => {
+  forceDmg = on;
+  if (romLoaded) resetGame(); // apply immediately: reload with the new mode
+});
 window.pocketgb.onSaveState((slot) => doSaveState(slot));
 window.pocketgb.onLoadState((slot) => doLoadState(slot));
 window.pocketgb.onAppQuitting(() => flushSav());

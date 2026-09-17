@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('pocketgb', {
   onReset: (cb) => ipcRenderer.on('reset', () => cb()),
   onPause: (cb) => ipcRenderer.on('pause', (e, paused) => cb(paused)),
   onMute: (cb) => ipcRenderer.on('mute', (e, muted) => cb(muted)),
+  onForceDmg: (cb) => ipcRenderer.on('force-dmg', (e, on) => cb(on)),
   onSaveState: (cb) => ipcRenderer.on('save-state', (e, slot) => cb(slot)),
   onLoadState: (cb) => ipcRenderer.on('load-state', (e, slot) => cb(slot)),
   onAppQuitting: (cb) => ipcRenderer.on('app-quitting', () => cb()),
