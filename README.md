@@ -90,7 +90,7 @@ the CPU keeps running.
 
 ---
 
-## ⚡ Performance
+## Performance
 
 The core runs a full frame in **~1.9 ms** (≈ 517 fps cap, 8.6× realtime headroom), measured on a CPU-heavy workload — rendering, audio, and timers included. Hot paths are allocation-free per frame; the timer is O(1) via falling-edge counting.
 
