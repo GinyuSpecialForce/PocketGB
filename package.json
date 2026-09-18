@@ -1,15 +1,55 @@
 {
   "name": "pocketgb",
-  "version": "1.0.0",
-  "description": "Game Boy (DMG) emulator for macOS",
+  "version": "1.1.0",
+  "description": "Game Boy (DMG) and Game Boy Color emulator for desktop",
   "main": "main.js",
+  "author": "PocketGB contributors",
+  "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "test": "node --test",
-    "fetch-tests": "node test/fetch-blargg.js"
+    "test": "node --test test/*.test.js",
+    "fetch-tests": "node test/fetch-blargg.js",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "app.pocketgb.emulator",
+    "productName": "PocketGB",
+    "publish": [
+      { "provider": "github", "owner": "pocketgb", "repo": "pocketgb" }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "app.js",
+      "index.html",
+      "pocketgb-preload.js",
+      "src/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.games",
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] }
+      ]
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Game"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
   },
   "allowScripts": {
     "electron@33.4.11": true
