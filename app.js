@@ -1,5 +1,7 @@
 // PocketGB — app controller (renderer side)
 'use strict';
+// romtitle.js exposes titleLooksBroken/basenameOf/extractRomTitle as classic
+// script globals; app.js is renderer-only, so they are called bare here.
 
 const gb = new GameBoy();
 const renderer = new Renderer(document.getElementById('screen'));
@@ -11,6 +13,8 @@ const debug = new DebugView(gb, renderer);
 const apu = gb.apu;
 
 let romInfo = null;
+let bootAnim = null; // generated boot animation (null when idle/finished)
+let bootChimePlayed = true; // one-shot guard for the boot chime
 let paused = false;
 let muted = false;
 let forceDmg = false; // menu toggle: run CGB games in classic DMG mode
@@ -53,6 +57,29 @@ input.onHotkey((action) => {
 });
 
 // ---- link cable ----
+// Game Boy Printer: intercepts serial traffic when enabled (the printer and a
+// link peer are mutually exclusive — one device sits on the cable at a time).
+let printerEnabled = false;
+let printer = null;
+function setPrinterEnabled(on) {
+  printerEnabled = on;
+  if (on && window.GBPrinter) {
+    printer = new GBPrinter();
+    printer.onPrint = (png) => savePrinterImage(png);
+    gb.serial.onSend = (b) => { printer.receiveByte(b); };
+    setStatus('game boy printer attached');
+  } else {
+    printer = null;
+    gb.serial.onSend = (b) => window.pocketgb.linkSend(b);
+  }
+  updateLinkStatus();
+}
+async function savePrinterImage(png) {
+  const b64 = btoa(String.fromCharCode(...png));
+  const name = `${(!titleLooksBroken(romInfo?.title) ? romInfo.title : 'printout').replace(/[^\w ]/g, '_')}-${printer.sheets}.png`;
+  const p = await window.pocketgb.saveFile(name, b64);
+  if (p) setStatus(`printed → ${p.split('/').pop()}`);
+}
 gb.serial.onSend = (b) => window.pocketgb.linkSend(b);
 window.pocketgb.onLinkData((u8) => {
   for (const b of u8) gb.serial.receiveByte(b);
@@ -85,9 +112,12 @@ async function doLinkHost() {
 }
 async function doLinkJoin() {
   const port = parseInt($('link-port').value, 10);
-  const st = await window.pocketgb.linkJoin(Number.isFinite(port) ? port : 8765);
+  // optional opponent address: '192.168.1.20' or 'example.com' — blank means localhost
+  const addrRaw = ($('link-addr').value || '').trim();
+  const host = addrRaw && !/^[0-9.]+$|^localhost$/i.test(addrRaw) ? addrRaw : (addrRaw || '127.0.0.1');
+  const st = await window.pocketgb.linkJoin(Number.isFinite(port) ? port : 8765, host);
   updateLinkStatus();
-  setStatus('link joining…');
+  setStatus(host === '127.0.0.1' ? 'link joining…' : `link joining ${host}…`);
 }
 function doLinkStop() {
   window.pocketgb.linkStop();
@@ -145,6 +175,32 @@ function loop(t) {
   if (t - lastFrameTime < FRAME_MS / speed - 1.5) return;
   lastFrameTime = Math.min(t, lastFrameTime + FRAME_MS / speed);
 
+  // generated boot animation (no user boot ROM): falling logo + chime + CGB wash
+  if (bootAnim) {
+    if (!bootAnim.done) {
+      bootAnim.drawFrame();
+      playBootChime();
+      renderer.blit(bootAnim.fb, gb.mmu.cgb);
+      renderer.present();
+      if (bootAnim.done) { bootAnim = null; lastFrameTime = t; }
+      return;
+    }
+    bootAnim = null;
+  }
+
+  // debugger run-to-breakpoint: emulate as fast as possible until PC hits one
+  if (dbgRunning) {
+    for (let i = 0; i < 120 && dbgRunning; i++) { // bounded per frame: UI stays alive
+      const hit = gb._breakpoints && gb._breakpoints.has(gb.cpu.pc);
+      if (hit) { dbgRunning = false; setStatus(`breakpoint $${gb.cpu.pc.toString(16).toUpperCase().padStart(4, '0')}`); break; }
+      gb.stepInstruction();
+    }
+    const fb2 = gb.ppu.colorFramebuffer || gb.ppu.framebuffer;
+    renderer.blit(fb2, gb.mmu.cgb);
+    renderer.present();
+    return;
+  }
+
   // Produce one frame per pacing tick minimum; produce extra frames in a
   // burst only while the audio buffer has room. The audio gate must never be
   // able to starve video: if the audio context is suspended or drains slowly,
@@ -154,7 +210,16 @@ function loop(t) {
   const rate = apu.outputRate || 44100;
   const burst = audio.buffered() < rate * (turbo ? 0.02 : 0.15) ? maxFrames : 1;
   for (let i = 0; i < burst; i++) {
+    // movie playback overrides live input for the frame; recording observes it
+    if (moviePlayer.playing) {
+      const mask = moviePlayer.next();
+      if (mask === null) { setStatus('movie finished'); }
+      else gb.joypad.setState(window.PocketMovie.maskToState(mask));
+    }
     const fb = gb.runFrame();
+    if (movieRecorder.recording) {
+      movieRecorder.observe(window.PocketMovie.stateToMask(input.state));
+    }
     if (fb) {
       framesThisSecond++;
       if (i === burst - 1) { // present the last frame of the burst
@@ -174,6 +239,77 @@ function loop(t) {
   }
 }
 let framesThisSecond = 0, fpsLast = performance.now();
+let dbgRunning = false;
+
+// ---- movies (deterministic input record/replay) ----
+const movieRecorder = window.PocketMovie ? new window.PocketMovie.MovieRecorder() : null;
+const moviePlayer = window.PocketMovie ? new window.PocketMovie.MoviePlayer() : null;
+$('btn-movie-rec').addEventListener('click', () => {
+  if (!romLoaded) { setStatus('load a game first'); return; }
+  if (movieRecorder.recording) {
+    const bytes = movieRecorder.stop();
+    const b64 = btoa(String.fromCharCode(...bytes));
+    window.pocketgb.saveFile(`${(!titleLooksBroken(romInfo.title) ? romInfo.title : 'movie').replace(/[^\w ]/g, '_')}-${Math.floor(framesThisSecond)}.pgm`, b64).then((p) => {
+      if (p) setStatus(`movie saved (${bytes.length} B)`);
+    });
+    $('btn-movie-rec').textContent = 'record movie';
+  } else {
+    movieRecorder.start(gb);
+    setStatus('recording input — play, then press again to save');
+    $('btn-movie-rec').textContent = 'stop & save';
+  }
+});
+$('btn-movie-play').addEventListener('click', () => {
+  if (!romLoaded) { setStatus('load a game first'); return; }
+  let inp = document.getElementById('movie-file');
+  if (!inp) {
+    inp = document.createElement('input');
+    inp.type = 'file'; inp.id = 'movie-file'; inp.accept = '.pgm';
+    inp.style.display = 'none';
+    document.body.appendChild(inp);
+    inp.addEventListener('change', async () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      const buf = await f.arrayBuffer();
+      const err = moviePlayer.load(new Uint8Array(buf), gb);
+      if (err) { setStatus(err); return; }
+      const startErr = moviePlayer.start(gb);
+      if (startErr) { setStatus(startErr); return; }
+      setStatus(`replaying ${moviePlayer.total} frames…`);
+    });
+  }
+  inp.click();
+});
+
+// ---- debugger controls ----
+function dbgPause() { dbgRunning = false; setPaused(true); }
+function dbgStep(n = 1) {
+  dbgPause();
+  for (let i = 0; i < n; i++) gb.stepInstruction();
+  const fb = gb.ppu.colorFramebuffer || gb.ppu.framebuffer;
+  renderer.blit(fb, gb.mmu.cgb);
+  renderer.present();
+  setStatus(`stepped ×${n} — PC=$${gb.cpu.pc.toString(16).toUpperCase().padStart(4, '0')}`);
+  if (typeof debug !== 'undefined' && debug) debug.render();
+}
+$('bp-add').addEventListener('click', () => {
+  const raw = ($('bp-input').value || '').replace(/^\$|0x/gi, '').trim();
+  const v = parseInt(raw, 16);
+  if (!Number.isFinite(v)) { setStatus('bad breakpoint address'); return; }
+  gb.addBreakpoint(v);
+  setStatus(`breakpoint $${v.toString(16).toUpperCase().padStart(4, '0')} set`);
+  if (typeof debug !== 'undefined' && debug) debug.render();
+});
+$('bp-clear').addEventListener('click', () => { gb.clearBreakpoints(); setStatus('breakpoints cleared'); if (typeof debug !== 'undefined' && debug) debug.render(); });
+$('bp-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('bp-add').click(); });
+$('dbg-step').addEventListener('click', () => dbgStep(1));
+$('dbg-step8').addEventListener('click', () => dbgStep(8));
+$('dbg-run').addEventListener('click', () => { dbgRunning = true; setPaused(false); setStatus('running to breakpoint…'); });
+$('disasm-follow').addEventListener('click', () => {
+  if (!debug) return;
+  debug.followPc = !debug.followPc;
+  $('disasm-follow').textContent = `follow PC: ${debug.followPc ? 'on' : 'off'}`;
+});
 
 function setStatus(text) { elStatus.textContent = text; }
 capture.setOnStatus(setStatus);
@@ -190,7 +326,7 @@ function setRewinding(on) {
 }
 
 // ---- settings persistence (global + per-game) ----
-const PER_GAME_KEYS = ['palette', 'scale'];
+const PER_GAME_KEYS = ['palette', 'scale', 'effects', 'shaderPackPath'];
 function settingsKey(key) { return romInfo ? `game:${romInfo.statesKey}:${key}` : `global:${key}`; }
 
 async function loadSetting(key, fallback) {
@@ -205,15 +341,32 @@ function saveSetting(key, value) {
 // ---- ROM loading ----
 async function loadRom(info) {
   romInfo = info;
-  const romBytes = new Uint8Array(info.bytes);
+  let romBytes = new Uint8Array(info.bytes);
+  if (info.patch && window.PocketPatch) {
+    const res = window.PocketPatch.applyPatch(romBytes, new Uint8Array(info.patch));
+    if (res.ok) {
+      romBytes = res.bytes;
+      setStatus(`patched with ${info.patchName} (${res.format})`);
+    } else {
+      setStatus(`patch failed: ${res.error} — loading unpatched`);
+    }
+  }
   const savData = info.savePath ? await window.pocketgb.readSav(info.savePath) : null;
-  gb.loadROM(romBytes, savData ? new Uint8Array(savData) : null, forceDmg);
+  // authentic boot ROM (user-supplied dump), cached from a previous session
+  let bootBytes = null;
+  try {
+    const b64 = await loadSetting('bootrom', null);
+    if (b64) bootBytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  } catch { bootBytes = null; }
+  gb.loadROM(romBytes, savData ? new Uint8Array(savData) : null, forceDmg, bootBytes);
   romLoaded = true;
   paused = false;
   rewinding = false;
   $('btn-pause').textContent = 'pause';
-  elRomName.textContent = info.title || info.name;
+  elRomName.textContent = (!titleLooksBroken(info.title) ? info.title : null) || info.name;
   showScreen(true);
+  bootChimePlayed = !!bootBytes; // chime only accompanies the generated animation
+  bootAnim = bootBytes ? null : new BootAnimation(gb.mmu.cgb); // no user boot ROM → generated intro
   audio.attach(gb.apu);
   audio.start();
   audio.setMuted(muted);
@@ -226,6 +379,25 @@ async function loadRom(info) {
   if (!settingsLoaded) { await initSettings(); settingsLoaded = true; }
   for (const key of PER_GAME_KEYS) await applySetting(key);
   resizeCanvas();
+}
+
+// Two-note boot chime (E5→B5) through the WebAudio context — used only by
+// the generated boot animation; a real boot ROM plays its own through the APU.
+function playBootChime() {
+  if (bootChimePlayed || !audio.ctx || muted) return;
+  const hz = bootAnim && bootAnim.audio();
+  if (!hz) return;
+  bootChimePlayed = true;
+  const osc = audio.ctx.createOscillator();
+  const g = audio.ctx.createGain();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(659, audio.ctx.currentTime);
+  g.gain.setValueAtTime(0.0001, audio.ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.12, audio.ctx.currentTime + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, audio.ctx.currentTime + 0.35);
+  osc.frequency.setValueAtTime(880, audio.ctx.currentTime + 0.12);
+  osc.connect(g); g.connect(audio.ctx.destination);
+  osc.start(); osc.stop(audio.ctx.currentTime + 0.4);
 }
 
 function startSavTimer() {
@@ -346,11 +518,22 @@ async function showLibrary() {
     });
     actions.appendChild(trashBtn);
     actions.appendChild(xBtn);
+    const editBtn = document.createElement('button');
+    editBtn.textContent = '✎';
+    editBtn.title = 'Edit ROM header (title, region, color mode)';
+    editBtn.addEventListener('click', (e) => { e.stopPropagation(); openHeaderEditor(r); });
+    const galBtn = document.createElement('button');
+    galBtn.textContent = '🖼';
+    galBtn.title = 'Screenshot gallery';
+    galBtn.addEventListener('click', (e) => { e.stopPropagation(); openGallery(r); });
+    actions.appendChild(editBtn);
+    actions.appendChild(galBtn);
     card.appendChild(actions);
-    // cover art: the newest save-state thumbnail for this game, if any
+    // cover art: user-chosen screenshot first, else newest save-state thumbnail
     const key = statesKeyFor(r.path);
-    let thumbB64 = null;
-    if (key) {
+    let thumbB64 = key ? await window.pocketgb.readCover(r.path, key) : null;
+    // (custom cover present — the card shows it directly; no state fallback)
+    if (!thumbB64 && key) {
       try {
         const states = await window.pocketgb.listStates(key);
         const best = states.filter((s) => s.hasThumb).sort((a, b) => b.mtime - a.mtime)[0];
@@ -370,11 +553,52 @@ async function showLibrary() {
     }
     const label = document.createElement('div');
     label.className = 'label';
-    label.textContent = r.title || r.path.split('/').pop();
+    label.textContent = (!titleLooksBroken(r.title) ? r.title : null) || basenameOf(r.path);
     card.appendChild(label);
     elLibGrid.appendChild(card);
   }
 }
+// ---- ROM header editor (title / region / CGB flag) ----
+const CGB_NAMES = { 0: 'DMG only', 128: 'DMG+CGB', 192: 'CGB only' };
+const REGION_NAMES = { 0: 'Japan', 1: 'Overseas' };
+let hdrEntry = null;
+function openHeaderEditor(entry) {
+  hdrEntry = entry;
+  $('hdr-file').textContent = entry.path;
+  $('hdr-title').value = entry.title && !titleLooksBroken(entry.title) ? entry.title : '';
+  $('hdr-title').placeholder = basenameOf(entry.path);
+  $('hdr-err').textContent = '';
+  // Seed selects from the live cartridge when it's this ROM; defaults otherwise.
+  const isCurrent = gb.cart && gb.cart.rom && romInfo && romInfo.path === entry.path;
+  $('hdr-cgb').value = String(isCurrent ? (gb.cart.cgbFlag ?? 0) : 0);
+  $('hdr-region').value = String(isCurrent ? (gb.cart.region ?? 1) : 1);
+  $('ov-hdr').classList.add('open');
+}
+$('hdr-close').addEventListener('click', () => $('ov-hdr').classList.remove('open'));
+$('hdr-save').addEventListener('click', async () => {
+  if (!hdrEntry) return;
+  const title = $('hdr-title').value.trim();
+  const patch = {
+    title: title || undefined,
+    region: Number($('hdr-region').value),
+    cgb: Number($('hdr-cgb').value),
+  };
+  const res = await window.pocketgb.writeRomHeader(hdrEntry.path, patch);
+  if (!res || !res.ok) { $('hdr-err').textContent = (res && res.error) || 'write failed'; return; }
+  $('ov-hdr').classList.remove('open');
+  const wasCurrent = romInfo && romInfo.path === hdrEntry.path;
+  if (wasCurrent) setStatus(`header saved — backup: ${res.backup}`);
+  else { await showLibrary(); setStatus(`header saved — backup: ${res.backup}`); }
+  if (wasCurrent) {
+    // Reload the running game so the new header takes effect immediately.
+    const romBytes = gb.cart.rom;
+    const sav = gb.cart.battery ? gb.cart.serializeSav() : null;
+    gb.loadROM(romBytes, sav, forceDmg);
+    romInfo.title = title || romInfo.title;
+    elRomName.textContent = romInfo.title;
+  }
+});
+
 function showScreen(visible) {
   elLibrary.classList.toggle('hidden', visible);
   elBezel.classList.toggle('visible', visible);
@@ -390,7 +614,7 @@ function openDeleteConfirm({ mode, entry }) {
   const title = $('del-title');
   const text = $('del-text');
   const yes = $('del-yes');
-  const name = entry.title || entry.path.split('/').pop();
+  const name = (!titleLooksBroken(entry.title) ? entry.title : null) || basenameOf(entry.path);
   if (mode === 'rom') {
     title.textContent = `remove "${name}"?`;
     text.textContent = 'The game disappears from your recent list and won\'t show up when you run PocketGB. Its saves and save-states are deleted too. The ROM file itself stays on disk.';
@@ -485,6 +709,54 @@ function addCheat() {
 }
 
 // ---- effects UI ----
+// Shader pack state: the parsed pack (or null = built-in LCD shader) plus the
+// file path it came from (for per-pack persistence + hot reload).
+let shaderPackPath = null;
+async function applyShaderPackFromText(text, path, quiet) {
+  const parsed = window.PocketShaderPack.parseShaderPack(text);
+  if (parsed.error) {
+    $('fx-pack-err').textContent = parsed.error;
+    if (!quiet) setStatus(`shader pack rejected: ${parsed.error}`);
+    return false; // keep whatever pack was active before
+  }
+  $('fx-pack-err').textContent = '';
+  renderer.setShaderPack(parsed);
+  shaderPackPath = path || null;
+  if (!fxOn()) $('fx-shader').value = 'on'; // a pack only shows with the shader enabled
+  saveEffects();
+  saveSetting('shaderPackPath', shaderPackPath);
+  if (!quiet) setStatus(`shader pack: ${parsed.name}`);
+  return true;
+}
+function clearShaderPack(quiet) {
+  renderer.setShaderPack(null);
+  shaderPackPath = null;
+  saveSetting('shaderPackPath', null);
+  $('fx-pack-err').textContent = '';
+  if (!quiet) setStatus('shader pack cleared — built-in LCD shader');
+}
+function fxOn() { return $('fx-shader').value === 'on'; }
+async function loadSavedShaderPack() {
+  const p = await loadSetting('shaderPackPath', null);
+  if (!p || !window.pocketgb.readShaderPack) return;
+  const res = await window.pocketgb.readShaderPack(p);
+  if (res && res.ok) await applyShaderPackFromText(res.text, p, true);
+  else if (res && res.error) $('fx-pack-err').textContent = `saved pack unavailable: ${res.error}`;
+}
+$('fx-pack-load').addEventListener('click', async () => {
+  const res = await window.pocketgb.openShaderPack();
+  if (!res) return; // canceled
+  if (!res.ok) { $('fx-pack-err').textContent = res.error; return; }
+  await applyShaderPackFromText(res.text, res.path);
+});
+$('fx-pack-clear').addEventListener('click', () => clearShaderPack());
+if (window.pocketgb.onShaderPackChanged) {
+  window.pocketgb.onShaderPackChanged(async (p) => {
+    const res = await window.pocketgb.readShaderPack(p);
+    if (res && res.ok) await applyShaderPackFromText(res.text, p, true);
+  });
+}
+
 async function initEffects() {
   const fx = await loadSetting('effects', { ghosting: false, scanlines: false, shader: false, curvature: false });
   $('fx-ghost').value = fx.ghosting ? 'on' : 'off';
@@ -492,6 +764,7 @@ async function initEffects() {
   $('fx-shader').value = fx.shader ? 'on' : 'off';
   $('fx-curve').value = fx.curvature ? 'on' : 'off';
   renderer.setEffects(fx);
+  await loadSavedShaderPack();
 }
 function saveEffects() {
   const fx = {
@@ -575,6 +848,22 @@ async function initSettings() {
 async function applySetting(key) {
   if (key === 'palette') { elPalette.value = await loadSetting('palette', 'dmg'); applyPalette(); }
   if (key === 'scale') { elScale.value = String(await loadSetting('scale', 0)); resizeCanvas(); }
+  if (key === 'effects') {
+    const fx = await loadSetting('effects', { ghosting: false, scanlines: false, shader: false, curvature: false });
+    $('fx-ghost').value = fx.ghosting ? 'on' : 'off';
+    $('fx-scan').value = fx.scanlines ? 'on' : 'off';
+    $('fx-shader').value = fx.shader ? 'on' : 'off';
+    $('fx-curve').value = fx.curvature ? 'on' : 'off';
+    renderer.setEffects(fx);
+  }
+  if (key === 'shaderPackPath') {
+    const p = await loadSetting('shaderPackPath', null);
+    if (p && p !== shaderPackPath && window.pocketgb.readShaderPack) {
+      const res = await window.pocketgb.readShaderPack(p);
+      if (res && res.ok) { await applyShaderPackFromText(res.text, p, true); return; }
+    }
+    if (!p) clearShaderPack(true);
+  }
 }
 function applyPalette() {
   renderer.setPalette(PALETTES[elPalette.value] || PALETTES.dmg);
@@ -593,6 +882,7 @@ function resizeCanvas() {
 
 // ---- IPC wiring ----
 window.pocketgb.onRomOpened((info) => loadRom(info));
+if (pocketgb.onUpdateStatus) pocketgb.onUpdateStatus((text) => setStatus(text)); // auto-updater progress
 window.pocketgb.onReset(() => resetGame());
 window.pocketgb.onPause((p) => setPaused(p));
 window.pocketgb.onMute((m) => setMuted(m));
@@ -612,6 +902,84 @@ $('btn-mute').addEventListener('click', () => setMuted(!muted));
 $('btn-library').addEventListener('click', showLibrary);
 $('del-yes').addEventListener('click', confirmDelete);
 $('del-no').addEventListener('click', closeDeleteConfirm);
+
+// ---- game clock (RTC) control ----
+function fmtClock(t) {
+  const p = (n) => String(n).padStart(2, '0');
+  const day = t.dl + (t.dayCarry ? 512 : 0);
+  return `day ${day}, ${p(t.hour)}:${p(t.min)}:${p(t.sec)}${t.halt ? ' (halted)' : ''}`;
+}
+async function openClockPanel() {
+  toggleOverlay('ov-clock');
+  if (!romLoaded || !gb.cart || !gb.cart.hasRtc) {
+    $('clock-readout').textContent = romLoaded ? 'this game has no real-time clock' : 'load a game first';
+    $('clock-rate').disabled = true;
+    return;
+  }
+  $('clock-rate').disabled = false;
+  $('clock-rate').value = String(gb.cart.rtcRate || 1);
+  $('clock-readout').textContent = fmtClock(gb.cart.getRtcTime());
+  clearInterval(clockTickTimer);
+  clockTickTimer = setInterval(() => {
+    if (romLoaded && gb.cart && gb.cart.hasRtc) $('clock-readout').textContent = fmtClock(gb.cart.getRtcTime());
+  }, 1000);
+}
+function setGameHour(h) {
+  if (!romLoaded || !gb.cart || !gb.cart.hasRtc) return;
+  gb.cart.setRtcTime({ hour: h, min: 0, sec: 0 });
+  $('clock-readout').textContent = fmtClock(gb.cart.getRtcTime());
+}
+let clockTickTimer = null;
+$('btn-clock').addEventListener('click', openClockPanel);
+$('btn-printer').addEventListener('click', () => {
+  setPrinterEnabled(!printerEnabled);
+  $('btn-printer').textContent = `printer: ${printerEnabled ? 'on' : 'off'}`;
+});
+
+// ---- boot ROM (authentic Nintendo boot animation/chime, user-supplied dump) ----
+async function updateBootRomButton() {
+  const b64 = await loadSetting('bootrom', null);
+  $('btn-bootrom').textContent = `boot rom: ${b64 ? 'on' : 'off'}`;
+}
+$('btn-bootrom').addEventListener('click', async () => {
+  const b64 = await loadSetting('bootrom', null);
+  if (b64) {
+    await saveSetting('bootrom', null);
+    updateBootRomButton();
+    setStatus('boot ROM disabled — using fast boot');
+    return;
+  }
+  // pick a file via a hidden input (File API; no dialog changes needed)
+  let inp = document.getElementById('bootrom-file');
+  if (!inp) {
+    inp = document.createElement('input');
+    inp.type = 'file'; inp.id = 'bootrom-file'; inp.accept = '.bin,.rom,.gb';
+    inp.style.display = 'none';
+    document.body.appendChild(inp);
+    inp.addEventListener('change', async () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      const buf = await f.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      if (bytes.length !== 0x100 && bytes.length !== 0x900 && bytes.length !== 0x800) {
+        setStatus('not a boot ROM (expected 256 B DMG or 2 KB CGB dump)');
+        return;
+      }
+      await saveSetting('bootrom', btoa(String.fromCharCode(...bytes)));
+      updateBootRomButton();
+      setStatus(`boot ROM loaded (${bytes.length} B) — reload the game`);
+    });
+  }
+  inp.click();
+});
+updateBootRomButton();
+$('clock-close').addEventListener('click', () => { clearInterval(clockTickTimer); toggleOverlay('ov-clock'); });
+$('clock-rate').addEventListener('change', () => {
+  if (romLoaded && gb.cart && gb.cart.hasRtc) gb.cart.setRtcRate(parseInt($('clock-rate').value, 10) || 1);
+});
+$('clock-day').addEventListener('click', () => setGameHour(6));
+$('clock-night').addEventListener('click', () => setGameHour(18));
+$('clock-noon').addEventListener('click', () => setGameHour(12));
 $('btn-cheats').addEventListener('click', () => toggleOverlay('ov-cheats'));
 $('btn-effects').addEventListener('click', () => toggleOverlay('ov-effects'));
 $('btn-keys').addEventListener('click', () => toggleOverlay('ov-keys'));
@@ -623,14 +991,87 @@ $('btn-debug').addEventListener('click', () => {
 });
 $('debug-close').addEventListener('click', () => { toggleOverlay('ov-debug'); debug.stop(); });
 
-// screenshot: canvas → PNG data URL → save dialog in main
-$('btn-shot').addEventListener('click', () => {
+// screenshot: canvas → PNG data URL → save dialog in main.
+// Every shot is also filed into the per-game gallery (shotsDir) and can be
+// picked as the game's cover art from the library.
+$('btn-shot').addEventListener('click', async () => {
   const dataUrl = capture.screenshot();
+  const b64 = dataUrl.split(',')[1];
+  if (romInfo && window.pocketgb.saveShot) {
+    const res = await window.pocketgb.saveShot(romInfo.statesKey, b64);
+    if (res && res.ok) setStatus('screenshot saved to gallery');
+  }
   const name = `pocketgb-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
-  window.pocketgb.saveFile(name, dataUrl.split(',')[1]).then((p) => {
-    setStatus(p ? `saved ${p.split('/').pop()}` : 'save canceled');
+  window.pocketgb.saveFile(name, b64).then((p) => {
+    if (p) setStatus(`also saved ${p.split('/').pop()}`);
   });
 });
+
+// ---- screenshot gallery (filmstrip + cover art) ----
+let galleryKey = null, galleryRomPath = null, galleryCoverFile = null;
+async function openGallery(entry) {
+  galleryKey = statesKeyForEntry(entry);
+  galleryRomPath = entry.path;
+  $('gal-game').textContent = entry.title || basenameOf(entry.path);
+  $('ov-gallery').classList.add('open');
+  await renderGallery();
+}
+function statesKeyForEntry(entry) {
+  try {
+    return btoa(entry.path.toLowerCase()).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  } catch { return null; }
+}
+async function renderGallery() {
+  const film = $('gal-film');
+  film.textContent = '';
+  if (!galleryKey) { film.textContent = 'gallery unavailable'; return; }
+  const [shots, coverB64] = await Promise.all([
+    window.pocketgb.listShots(galleryKey),
+    window.pocketgb.readCover(galleryRomPath, galleryKey),
+  ]);
+  if (!shots.length) {
+    const d = document.createElement('div');
+    d.className = 'empty';
+    d.textContent = 'no screenshots yet — press screenshot while playing';
+    film.appendChild(d);
+    return;
+  }
+  for (const s of shots) {
+    const wrap = document.createElement('div');
+    wrap.className = 'shot';
+    const b64 = await window.pocketgb.readShot(galleryKey, s.file);
+    if (!b64) continue;
+    const img = document.createElement('img');
+    img.src = `data:image/png;base64,${b64}`;
+    img.alt = s.file;
+    wrap.appendChild(img);
+    if (coverB64 && s.file === galleryCoverFile) {
+      const star = document.createElement('span');
+      star.className = 'cover-star'; star.textContent = '★';
+      wrap.appendChild(star);
+    }
+    const acts = document.createElement('div');
+    acts.className = 'shot-actions';
+    const coverBtn = document.createElement('button');
+    coverBtn.textContent = '★ cover';
+    coverBtn.title = "Use this shot as the game's cover art";
+    coverBtn.addEventListener('click', async () => {
+      const r = await window.pocketgb.setCover(galleryRomPath, galleryKey, s.file);
+      if (r && r.ok) { galleryCoverFile = s.file; setStatus('cover art updated'); await renderGallery(); }
+    });
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '🗑';
+    delBtn.title = 'Delete this screenshot';
+    delBtn.addEventListener('click', async () => {
+      await window.pocketgb.deleteShot(galleryKey, s.file);
+      await renderGallery();
+    });
+    acts.appendChild(coverBtn); acts.appendChild(delBtn);
+    wrap.appendChild(acts);
+    film.appendChild(wrap);
+  }
+}
+$('gal-close').addEventListener('click', () => $('ov-gallery').classList.remove('open'));
 
 // gif: toggle recording of the last/next ~10s of frames
 let gifRecording = false;
@@ -680,14 +1121,44 @@ window.addEventListener('dragleave', (e) => { if (e.target === document.document
 window.addEventListener('drop', async (e) => {
   e.preventDefault(); e.stopPropagation();
   document.body.classList.remove('dragging');
-  const file = e.dataTransfer.files && e.dataTransfer.files[0];
-  if (!file) return;
+  const files = [...(e.dataTransfer.files || [])];
+  if (!files.length) return;
+  if (window.PocketPatch) {
+    const romFile = files.find((f) => !window.PocketPatch.isPatchPath(f.name));
+    const patchFile = files.find((f) => window.PocketPatch.isPatchPath(f.name));
+    if (romFile) {
+      const buf = await romFile.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      if (bytes.length < 0x150) { setStatus('not a GB ROM'); return; }
+      const title = window.PocketTitle.extractRomTitle(bytes) || romFile.name;
+      const key = `drop-${hashName(romFile.name)}`;
+      let patchBuf = null, patchName = null;
+      if (patchFile) { patchBuf = await patchFile.arrayBuffer(); patchName = patchFile.name; }
+      else {
+        // ROM-hack convention: <rom>.ips/.ups/.bps sitting next to the ROM file
+        const base = romFile.name.replace(/\.[^.]+$/, '');
+        const siblings = files.filter((f) => f !== romFile);
+        const sib = siblings.find((f) => ['.ips', '.ups', '.bps', '.aps', '.rup', '.ppf', '.vcdiff', '.xdelta'].some((ext) => f.name.toLowerCase() === (base + ext).toLowerCase()));
+        if (sib) { patchBuf = await sib.arrayBuffer(); patchName = sib.name; }
+      }
+      await loadRom({
+        name: romFile.name,
+        title,
+        bytes: buf,
+        patch: patchBuf,
+        patchName,
+        savePath: `${key}.sav`,
+        statesDir: 'drop',
+        statesKey: key,
+      });
+      return;
+    }
+  }
+  const file = files[0];
   const buf = await file.arrayBuffer();
   const bytes = new Uint8Array(buf);
   if (bytes.length < 0x150) { setStatus('not a GB ROM'); return; }
-  let title = '';
-  for (let i = 0x134; i <= 0x142; i++) { const ch = bytes[i]; if (ch >= 32 && ch < 127) title += String.fromCharCode(ch); }
-  title = title.trim() || file.name;
+  const title = window.PocketTitle.extractRomTitle(bytes) || file.name;
   const key = `drop-${hashName(file.name)}`;
   await loadRom({
     name: file.name,
