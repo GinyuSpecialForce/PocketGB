@@ -172,6 +172,18 @@
     .overlay .row { display: flex; gap: 8px; }
     .overlay .err { color: #e78a8a; min-height: 14px; font-size: 11px; }
     .overlay .list { display: flex; flex-direction: column; gap: 6px; }
+    .filmstrip { display: flex; flex-wrap: wrap; gap: 8px; max-height: 300px; overflow-y: auto; }
+    .filmstrip .shot { position: relative; }
+    .filmstrip .shot img { width: 160px; image-rendering: pixelated; border-radius: 4px; display: block; }
+    .filmstrip .shot .shot-actions {
+      position: absolute; inset: auto 0 0 0; display: flex; gap: 4px; justify-content: center;
+      opacity: 0; transition: opacity 0.12s; padding: 4px;
+      background: linear-gradient(transparent, rgba(0,0,0,0.65));
+    }
+    .filmstrip .shot:hover .shot-actions { opacity: 1; }
+    .filmstrip .shot button { font-size: 10px; padding: 2px 6px; cursor: pointer; }
+    .filmstrip .cover-star { position: absolute; top: 4px; right: 4px; font-size: 12px; }
+    .filmstrip .empty { color: var(--text-dim); font-size: 12px; }
     .overlay .cheat {
       display: flex; align-items: center; gap: 8px;
       background: var(--bg); border-radius: var(--radius); padding: 7px 9px;
@@ -197,6 +209,11 @@
     .overlay .bindrow button.listening { border-color: var(--primary); color: var(--primary); }
     .overlay .more-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
     .overlay .more-grid .sbutton { font-size: 11px; }
+    .overlay .menu-sec + .menu-sec { margin-top: 10px; }
+    .overlay .sec-label {
+      color: var(--text-soft); font-size: 10px; text-transform: uppercase;
+      letter-spacing: 0.09em; margin: 0 0 5px;
+    }
     .overlay .sbutton.danger { border-color: #7a4040; color: #ffb0b0; }
     .overlay .sbutton.danger:hover { background: #3a2020; color: #ffd4d4; }
     /* overlay buttons sit on a lifted box, so they use the control surface */
@@ -252,7 +269,7 @@
         <div class="box">
           <h2>cheats</h2>
           <div class="row">
-            <input type="text" id="cheat-input" placeholder="01XXXXYY or XXXYYYZZZ" spellcheck="false">
+            <input type="text" id="cheat-input" placeholder="010238CD or 068-5FF-E66" spellcheck="false">
           </div>
           <div class="row">
             <button class="sbutton" id="cheat-add">add</button>
@@ -260,7 +277,7 @@
           </div>
           <div class="err" id="cheat-err"></div>
           <div class="list" id="cheat-list"></div>
-          <div class="hint">GameShark codes edit RAM (01XXXXYY). Game Genie codes patch ROM (XXXYYY or XXXYYYZZZ with compare).</div>
+          <div class="hint">GameShark codes edit RAM — 01 + value + address, e.g. 010238CD writes 02 to CD38. Game Genie codes patch ROM (XXXYYY or XXXYYYZZZ with compare).</div>
           <div class="actions2"><button class="sbutton" id="cheat-close">close</button></div>
         </div>
       </div>
@@ -277,7 +294,14 @@
             <option value="off">off</option><option value="on">on</option></select></div>
           <div class="kv"><span class="k">screen curvature</span><select id="fx-curve">
             <option value="off">off</option><option value="on">on</option></select></div>
-          <div class="hint">Ghosting mimics the DMG LCD's response time. The shader adds a subpixel LCD grid and optional curvature (needs WebGL; falls back to plain 2D).</div>
+          <div class="kv"><span class="k">shader pack</span>
+            <div class="row">
+              <button class="sbutton" id="fx-pack-load">load .pbg-fx…</button>
+              <button class="sbutton" id="fx-pack-clear">clear</button>
+            </div>
+          </div>
+          <div class="err" id="fx-pack-err"></div>
+          <div class="hint">Ghosting mimics the DMG LCD's response time. The shader adds a subpixel LCD grid and optional curvature (needs WebGL; falls back to plain 2D). A shader pack replaces the built-in shader with your own GLSL (.pbg-fx); saving the file in an editor hot-reloads it.</div>
           <div class="actions2"><button class="sbutton" id="fx-close">close</button></div>
         </div>
       </div>
@@ -288,9 +312,45 @@
           <h2>debug</h2>
           <div class="hint" id="debug-cpu" style="font-variant-numeric: tabular-nums; line-height: 1.7;"></div>
           <div class="hint" id="debug-ppu" style="font-variant-numeric: tabular-nums; line-height: 1.7;"></div>
+          <div class="kv">
+            <span class="k">breakpoint</span>
+            <input type="text" id="bp-input" placeholder="$0038 or 0038" spellcheck="false" style="width: 110px;">
+            <button class="sbutton" id="bp-add">set</button>
+            <button class="sbutton" id="bp-clear">clear all</button>
+          </div>
+          <div class="row">
+            <button class="sbutton" id="dbg-step">step</button>
+            <button class="sbutton" id="dbg-step8">step ×8</button>
+            <button class="sbutton" id="dbg-run">run to bp</button>
+          </div>
+          <div class="kv"><span class="k" id="disasm-addr">disassembly</span>
+            <button class="sbutton" id="disasm-follow">follow PC: on</button>
+          </div>
+          <pre id="disasm-list" style="font-size: 11px; line-height: 1.55; margin: 0; font-variant-numeric: tabular-nums; min-height: 200px;"></pre>
           <div class="kv"><span class="k">VRAM tiles (bank 0, all 384)</span></div>
           <canvas id="vram-view" width="384" height="128" style="width: 384px; image-rendering: pixelated; background: #151317;"></canvas>
           <div class="actions2"><button class="sbutton" id="debug-close">close</button></div>
+        </div>
+      </div>
+
+      <!-- RTC clock control (MBC3 games) -->
+      <div class="overlay" id="ov-clock">
+        <div class="box">
+          <h2>game clock</h2>
+          <div class="hint" id="clock-readout">no RTC in this game</div>
+          <div class="kv"><span class="k">clock speed</span><select id="clock-rate">
+            <option value="1">real time</option>
+            <option value="60">1 min/sec (1 h per minute)</option>
+            <option value="360">6 min/sec (1 day per 4 min)</option>
+            <option value="3600">1 h/sec (1 day per 24 s)</option>
+          </select></div>
+          <div class="row">
+            <button class="sbutton" id="clock-day">morning</button>
+            <button class="sbutton" id="clock-night">night</button>
+            <button class="sbutton" id="clock-noon">noon</button>
+          </div>
+          <div class="hint">For MBC3 games (Pokémon G/S/C, Harvest Moon). Changes persist in the battery save. Morning=6:00, night=18:00.</div>
+          <div class="actions2"><button class="sbutton" id="clock-close">close</button></div>
         </div>
       </div>
 
@@ -303,6 +363,44 @@
             <button class="sbutton danger" id="del-yes">delete</button>
             <button class="sbutton" id="del-no">cancel</button>
           </div>
+        </div>
+      </div>
+
+      <!-- ROM header editor overlay -->
+      <div class="overlay" id="ov-hdr">
+        <div class="box">
+          <h2>edit ROM header</h2>
+          <div class="hint" id="hdr-file">—</div>
+          <label class="hint">title (max 15 chars)</label>
+          <input type="text" id="hdr-title" maxlength="15" />
+          <label class="hint">region</label>
+          <select id="hdr-region">
+            <option value="0">Japan (0)</option>
+            <option value="1">Overseas (1)</option>
+          </select>
+          <label class="hint">color (CGB compatibility)</label>
+          <select id="hdr-cgb">
+            <option value="0">DMG only (00)</option>
+            <option value="128">DMG+CGB (80)</option>
+            <option value="192">CGB only (C0)</option>
+          </select>
+          <div class="err" id="hdr-err"></div>
+          <div class="actions2">
+            <button class="sbutton" id="hdr-save">save to ROM</button>
+            <button class="sbutton" id="hdr-close">cancel</button>
+          </div>
+          <div class="hint">Writes a backup copy (.hdrbak) next to the ROM before saving. The game reloads with the new header.</div>
+        </div>
+      </div>
+
+      <!-- screenshot gallery overlay -->
+      <div class="overlay" id="ov-gallery">
+        <div class="box">
+          <h2>screenshots</h2>
+          <div class="hint" id="gal-game">—</div>
+          <div id="gal-film" class="list"></div>
+          <div class="hint">The newest 100 shots per game are kept here. A shot can be set as the game's cover art in the library.</div>
+          <div class="actions2"><button class="sbutton" id="gal-close">close</button></div>
         </div>
       </div>
 
@@ -350,17 +448,40 @@
     <div class="overlay" id="ov-menu">
       <div class="box" id="menu-panel">
         <h2>menu</h2>
-        <div class="more-grid">
-          <button class="sbutton" id="btn-library">library</button>
-          <button class="sbutton" id="btn-reset">reset</button>
-          <button class="sbutton" id="btn-cheats">cheats</button>
-          <button class="sbutton" id="btn-effects">effects</button>
-          <button class="sbutton" id="btn-keys">keys</button>
-          <button class="sbutton" id="btn-link">link cable</button>
-          <button class="sbutton" id="btn-shot">screenshot</button>
-          <button class="sbutton" id="btn-gif">record gif</button>
-          <button class="sbutton" id="btn-webm">record video</button>
-          <button class="sbutton" id="btn-debug">debug</button>
+        <div class="menu-sec">
+          <div class="sec-label">game</div>
+          <div class="more-grid">
+            <button class="sbutton" id="btn-library">library</button>
+            <button class="sbutton" id="btn-reset">reset</button>
+          </div>
+        </div>
+        <div class="menu-sec">
+          <div class="sec-label">options</div>
+          <div class="more-grid">
+            <button class="sbutton" id="btn-cheats">cheats</button>
+            <button class="sbutton" id="btn-effects">effects</button>
+            <button class="sbutton" id="btn-keys">keys</button>
+            <button class="sbutton" id="btn-debug">debug</button>
+          </div>
+        </div>
+        <div class="menu-sec">
+          <div class="sec-label">capture</div>
+          <div class="more-grid">
+            <button class="sbutton" id="btn-shot">screenshot</button>
+            <button class="sbutton" id="btn-gif">record gif</button>
+            <button class="sbutton" id="btn-webm">record video</button>
+            <button class="sbutton" id="btn-movie-rec">record movie</button>
+            <button class="sbutton" id="btn-movie-play">play movie…</button>
+          </div>
+        </div>
+        <div class="menu-sec">
+          <div class="sec-label">hardware</div>
+          <div class="more-grid">
+            <button class="sbutton" id="btn-link">link cable</button>
+            <button class="sbutton" id="btn-clock">game clock</button>
+            <button class="sbutton" id="btn-printer">printer: off</button>
+            <button class="sbutton" id="btn-bootrom">boot rom: off</button>
+          </div>
         </div>
         <div class="hint">tab = fast-forward · backspace = rewind · gamepad supported</div>
         <div class="actions2"><button class="sbutton" id="menu-close">close</button></div>
@@ -369,9 +490,12 @@
       <!-- link cable panel (opens on top of the menu) -->
       <div class="box hidden" id="link-panel">
         <h2>link cable</h2>
-        <div class="hint">Two-player trades over localhost TCP (e.g. Pokémon trading). Run two PocketGB windows: one hosts, the other joins with the same port. Both must run the same game.</div>
+        <div class="hint">Two-player trades over TCP. Same machine: run two PocketGB windows, one hosts, the other joins with the same port. Over the internet: one player hosts (and port-forwards or uses a tunnel), the other joins with that host's IP — or on the same Wi-Fi, the host's local IP.</div>
         <div class="row">
           <input type="text" id="link-port" placeholder="port (blank = auto)" spellcheck="false">
+        </div>
+        <div class="row">
+          <input type="text" id="link-addr" placeholder="opponent's IP for internet play (blank = localhost)" spellcheck="false">
         </div>
         <div class="row">
           <button class="sbutton" id="link-host">host</button>
@@ -398,11 +522,17 @@
 <script src="src/ui/rewind.js"></script>
 <script src="src/ui/capture.js"></script>
 <script src="src/ui/debug.js"></script>
+<script src="src/ui/boot-animation.js"></script>
+<script src="src/ui/shader-pack.js"></script>
 <script src="src/ui/audio.js"></script>
 <script src="src/core/cpu.js"></script>
 <script src="src/core/mmu.js"></script>
 <script src="src/core/ppu.js"></script>
 <script src="src/core/ppu-cgb.js"></script>
+  <script src="src/core/patch.js"></script>
+  <script src="src/core/romtitle.js"></script>
+  <script src="src/core/printer.js"></script>
+  <script src="src/core/movie.js"></script>
 <script src="src/core/apu.js"></script>
 <script src="src/core/timer.js"></script>
 <script src="src/core/joypad.js"></script>
