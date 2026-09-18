@@ -4,6 +4,9 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron')
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
+const { isPatchPath } = require('./src/core/patch');
+const { extractRomTitle, titleLooksBroken, basenameOf } = require('./src/core/romtitle');
+const updater = require('./src/main/updater');
 
 let win = null;
 let currentRom = null; // { name, path, dir }
@@ -12,6 +15,10 @@ let saveTimer = null;
 const userDir = () => app.getPath('userData');
 const savesDir = () => { const d = path.join(userDir(), 'saves'); fs.mkdirSync(d, { recursive: true }); return d; };
 const statesDir = () => { const d = path.join(userDir(), 'states'); fs.mkdirSync(d, { recursive: true }); return d; };
+const shotsDir = () => { const d = path.join(userDir(), 'shots'); fs.mkdirSync(d, { recursive: true }); return d; };
+const gameShotsDir = (key) => { const d = path.join(shotsDir(), path.basename(String(key))); fs.mkdirSync(d, { recursive: true }); return d; };
+const coversDir = () => { const d = path.join(userDir(), 'covers'); fs.mkdirSync(d, { recursive: true }); return d; };
+const SHOTS_KEEP = 100; // per-game screenshot history cap
 
 // ---- settings store (per-game + global) ----
 const settingsPath = () => path.join(userDir(), 'settings.json');
@@ -59,9 +66,10 @@ function startLinkServer(port) {
   });
 }
 
-function joinLink(port) {
+function joinLink(port, host) {
   stopLink();
-  const sock = net.connect(port || 8765, '127.0.0.1');
+  const target = (typeof host === 'string' && host.length) ? host : '127.0.0.1';
+  const sock = net.connect(port || 8765, target);
   linkSock = sock;
   sock.on('connect', () => send('link-status', linkStatus()));
   sock.on('data', (buf) => send('link-data', new Uint8Array(buf)));
@@ -97,20 +105,39 @@ function createWindow() {
 function openRomDialog() {
   dialog.showOpenDialog(win, {
     title: 'Open Game Boy ROM',
-    filters: [{ name: 'Game Boy ROMs', extensions: ['gb', 'gbc', 'bin', 'rom'] }],
-    properties: ['openFile'],
+    filters: [
+      { name: 'Game Boy ROMs and Patches', extensions: ['gb', 'gbc', 'bin', 'rom', 'ips', 'ups', 'bps', 'aps', 'rup', 'ppf', 'vcdiff', 'xdelta'] },
+      { name: 'ROM files', extensions: ['gb', 'gbc', 'bin', 'rom'] },
+      { name: 'Patches (IPS/UPS/BPS/APS/RUP/PPF/xdelta)', extensions: ['ips', 'ups', 'bps', 'aps', 'rup', 'ppf', 'vcdiff', 'xdelta'] },
+    ],
+    properties: ['openFile', 'multiSelections'],
   }).then(({ canceled, filePaths }) => {
-    if (!canceled && filePaths[0]) loadRomFromPath(filePaths[0]);
+    if (canceled || !filePaths.length) return;
+    const romPath = filePaths.find((p) => !isPatchPath(p)) || filePaths[0];
+    let patchPath = filePaths.find(isPatchPath) || null;
+    if (!patchPath) {
+      // auto-apply a same-named patch sitting beside the ROM (ROM-hack convention)
+      for (const ext of ['.ips', '.ups', '.bps', '.aps', '.rup', '.ppf', '.vcdiff', '.xdelta']) {
+        const candidate = romPath.replace(/\.[^.]+$/, '') + ext;
+        if (fs.existsSync(candidate)) { patchPath = candidate; break; }
+      }
+    }
+    loadRomFromPath(romPath, patchPath);
   });
 }
 
-function loadRomFromPath(romPath) {
+function loadRomFromPath(romPath, patchPath) {
   try {
     const data = fs.readFileSync(romPath);
     if (data.length < 0x150) throw new Error('File too small to be a Game Boy ROM');
     const name = path.basename(romPath);
-    const title = data.slice(0x134, 0x143).toString('latin1').replace(/\0+$/g, '').trim() || name;
+    const title = extractRomTitle(data) || name;
     currentRom = { name, path: romPath, dir: path.dirname(romPath), title };
+    let patchBytes = null, patchName = null;
+    if (patchPath && isPatchPath(patchPath)) {
+      try { patchBytes = fs.readFileSync(patchPath); patchName = path.basename(patchPath); }
+      catch { patchBytes = null; }
+    }
 
     // Recent ROMs list (kept in recent.json AND settings.json for the library UI)
     const recent = readRecent();
@@ -127,6 +154,8 @@ function loadRomFromPath(romPath) {
       title,
       path: romPath,
       bytes: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+      patch: patchBytes,
+      patchName,
       savePath,
       statesDir: statesDir(),
       statesKey: romKey(romPath),
@@ -144,7 +173,7 @@ function readRecent() {
 
 function recentItems() {
   return readRecent().map(r => ({
-    label: r.title || path.basename(r.path),
+    label: (!titleLooksBroken(r.title) ? r.title : null) || basenameOf(r.path),
     click: () => loadRomFromPath(r.path),
   }));
 }
@@ -154,6 +183,7 @@ function buildMenu() {
   const template = [
     ...(isMac ? [{ label: app.name, submenu: [
       { role: 'about' },
+      { label: 'Check for Updates…', click: () => updater.checkExplicit() },
       { type: 'separator' },
       { role: 'services' },
       { type: 'separator' },
@@ -183,6 +213,11 @@ function buildMenu() {
           click: () => send('load-state', i),
       })) },
     ] },
+    ...(isMac ? [] : [{ role: 'help', submenu: [
+      { label: 'Check for Updates…', click: () => updater.checkExplicit() },
+      { type: 'separator' },
+      { label: 'About PocketGB', role: 'about' },
+    ] }]),
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
@@ -273,6 +308,10 @@ app.whenReady().then(() => {
         }
       }
     } catch { /* best-effort */ }
+    try {
+      fs.rmSync(gameShotsDir(key), { recursive: true, force: true });
+      try { fs.unlinkSync(path.join(coversDir(), `${key}.png`)); } catch { }
+    } catch { /* best-effort */ }
     return removed;
   }
 
@@ -291,6 +330,151 @@ app.whenReady().then(() => {
     if (typeof romPath !== 'string' || !path.isAbsolute(romPath)) return { ok: false, reason: 'bad path' };
     const removed = deleteGameData(romPath);
     return { ok: true, removed };
+  });
+
+  // ---- screenshot history (per-game gallery) ----
+  // Shots live in userData/shots/<romKey>/<timestamp>.png; the newest SHOTS_KEEP
+  // are kept per game. Cover art is copied to covers/<romKey>.png and rendered
+  // by the library card instead of the save-state thumbnail.
+  ipcMain.handle('save-shot', (e, key, b64) => {
+    try {
+      const dir = gameShotsDir(key);
+      const file = path.join(dir, `${Date.now()}.png`);
+      fs.writeFileSync(file, Buffer.from(String(b64), 'base64'));
+      // cap the history: drop oldest beyond SHOTS_KEEP
+      const files = fs.readdirSync(dir).filter((f) => f.endsWith('.png')).sort();
+      for (const old of files.slice(0, Math.max(0, files.length - SHOTS_KEEP))) {
+        try { fs.unlinkSync(path.join(dir, old)); } catch { }
+      }
+      return { ok: true, file };
+    } catch (err) { return { ok: false, error: String(err.message || err) };
+    }
+  });
+  ipcMain.handle('list-shots', (e, key) => {
+    try {
+      const dir = gameShotsDir(key);
+      return fs.readdirSync(dir)
+        .filter((f) => f.endsWith('.png'))
+        .sort()
+        .reverse() // newest first
+        .map((f) => {
+          const full = path.join(dir, f);
+          return { file: f, mtime: fs.statSync(full).mtimeMs };
+        });
+    } catch { return []; }
+  });
+  ipcMain.handle('read-shot', (e, key, file) => {
+    try {
+      const dir = gameShotsDir(key);
+      const safe = path.basename(String(file));
+      if (!safe.endsWith('.png')) return null;
+      return fs.readFileSync(path.join(dir, safe)).toString('base64');
+    } catch { return null; }
+  });
+  ipcMain.handle('delete-shot', (e, key, file) => {
+    try {
+      const dir = gameShotsDir(key);
+      fs.unlinkSync(path.join(dir, path.basename(String(file))));
+      return { ok: true };
+    } catch (err) { return { ok: false, error: String(err.message || err) };
+    }
+  });
+  ipcMain.handle('set-cover', (e, romPath, key, file) => {
+    try {
+      // file may be a gallery shot name or null to clear the override
+      if (!file) {
+        try { fs.unlinkSync(path.join(coversDir(), `${key}.png`)); } catch { }
+        return { ok: true, cleared: true };
+      }
+      const src = path.join(gameShotsDir(key), path.basename(String(file)));
+      fs.copyFileSync(src, path.join(coversDir(), `${key}.png`));
+      return { ok: true };
+    } catch (err) { return { ok: false, error: String(err.message || err) };
+    }
+  });
+  ipcMain.handle('read-cover', (e, romPath, key) => {
+    try {
+      return fs.readFileSync(path.join(coversDir(), `${key}.png`)).toString('base64');
+    } catch { return null; }
+  });
+
+  // Shader packs: read a .pbg-fx file as text so the renderer can parse/compile it.
+  // The active pack is fs.watch'ed so saving it in an editor hot-reloads live.
+  let packWatcher = null, packWatchDebounce = null, packWatchedPath = null;
+  function watchShaderPack(p) {
+    try {
+      if (packWatcher) { packWatcher.close(); packWatcher = null; packWatchedPath = null; }
+      if (!p) return;
+      packWatchedPath = p;
+      packWatcher = fs.watch(p, () => {
+        clearTimeout(packWatchDebounce);
+        packWatchDebounce = setTimeout(() => {
+          if (win && !win.isDestroyed()) win.webContents.send('shader-pack-changed', packWatchedPath);
+        }, 300);
+      });
+    } catch { /* watch is best-effort */ }
+  }
+  ipcMain.handle('read-shader-pack', (e, packPath) => {
+    try {
+      if (typeof packPath !== 'string' || !path.isAbsolute(packPath)) return { ok: false, error: 'bad path' };
+      if (!packPath.toLowerCase().endsWith('.pbg-fx')) return { ok: false, error: 'not a .pbg-fx file' };
+      const text = fs.readFileSync(packPath, 'utf8');
+      watchShaderPack(packPath);
+      return { ok: true, text, path: packPath };
+    } catch (err) { return { ok: false, error: String(err.message || err) };
+    }
+  });
+  ipcMain.handle('open-shader-pack', async () => {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'Load shader pack',
+      properties: ['openFile'],
+      filters: [{ name: 'PocketGB shader packs', extensions: ['pbg-fx'] }],
+    });
+    if (r.canceled || !r.filePaths[0]) return null;
+    const p = r.filePaths[0];
+    try {
+      const text = fs.readFileSync(p, 'utf8');
+      watchShaderPack(p);
+      return { ok: true, text, path: p };
+    }
+    catch (err) { return { ok: false, error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('write-rom-header', (e, romPath, patch) => {
+    try {
+      if (typeof romPath !== 'string' || !path.isAbsolute(romPath)) return { ok: false, error: 'bad path' };
+      if (!patch || typeof patch !== 'object') return { ok: false, error: 'bad patch' };
+      // Accept only the three editable header fields; offsets are fixed by the cartridge header spec.
+      const buf = fs.readFileSync(romPath);
+      if (buf.length < 0x150 || buf[0x104] !== 0xCE || buf[0x105] !== 0xED) return { ok: false, error: 'not a Game Boy ROM (logo missing)' };
+      const backup = romPath.replace(/\.(gb|gbc|gbx|2)$/i, '') + '.hdrbak';
+      if (!fs.existsSync(backup)) fs.writeFileSync(backup, buf); // one backup only — always the pristine dump
+      if (typeof patch.title === 'string') {
+        const enc = Buffer.from(patch.title, 'latin1');
+        if (enc.length > 15) return { ok: false, error: 'title too long' };
+        buf.fill(0, 0x134, 0x144); // pad to the 15-byte field, NUL-terminated
+        enc.copy(buf, 0x134);
+      }
+      if (Number.isInteger(patch.region) && patch.region >= 0 && patch.region <= 1) buf[0x14A] = patch.region;
+      if (Number.isInteger(patch.cgb) && [0x00, 0x80, 0xC0].includes(patch.cgb)) buf[0x143] = patch.cgb;
+      fs.writeFileSync(romPath, buf);
+      // Keep the library consistent: new title → recent list + window title.
+      if (typeof patch.title === 'string') {
+        const rec = readRecent();
+        const entry = rec.find((r) => r.path === romPath);
+        if (entry) {
+          entry.title = patch.title;
+          fs.writeFileSync(path.join(userDir(), 'recent.json'), JSON.stringify(rec));
+          writeSetting('recent', rec.slice(0, 12));
+        }
+        if (currentRom && currentRom.path === romPath && win && !win.isDestroyed()) {
+          win.setTitle(`PocketGB — ${patch.title}`);
+        }
+      }
+      return { ok: true, backup };
+    } catch (err) { return { ok: false, error: String(err.message || err) };
+    }
   });
 
   ipcMain.handle('read-thumbnail', (e, statePath) => {
@@ -316,7 +500,7 @@ app.whenReady().then(() => {
 
   // link cable
   ipcMain.handle('link-host', (e, port) => { startLinkServer(Number(port) || 0); return linkStatus(); });
-  ipcMain.handle('link-join', (e, port) => { joinLink(Number(port) || 8765); return linkStatus(); });
+  ipcMain.handle('link-join', (e, port, host) => { joinLink(Number(port) || 8765, host); return linkStatus(); });
   ipcMain.handle('link-stop', () => { stopLink(); return linkStatus(); });
   ipcMain.on('link-send', (e, b) => {
     if (linkSock && !linkSock.destroyed) linkSock.write(Buffer.from([b & 0xFF]));
@@ -325,12 +509,17 @@ app.whenReady().then(() => {
   buildMenu();
   createWindow();
 
+  // Auto-update: silent background checks; explicit check via Help menu.
+  updater.start((text) => send('update-status', text));
+  ipcMain.handle('check-for-updates', () => updater.checkExplicit());
+
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
 app.on('window-all-closed', () => { app.quit(); });
 
 app.on('before-quit', () => {
+  updater.stop();
   stopLink();
   send('app-quitting');
 });
