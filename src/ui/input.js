@@ -37,6 +37,12 @@ class InputManager {
     window.addEventListener('keyup', (e) => this.handle(e, false));
     window.addEventListener('blur', () => this.clearAll());
     this._padRAF = requestAnimationFrame(() => this.pollGamepad());
+    // Focusing a text field releases held keys so a button pressed on the way
+    // into the field can't get stuck down while the field swallows keyups.
+    window.addEventListener('focusin', (e) => {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) this.clearAll();
+    });
   }
 
   // Gamepad: merged into the same state; last-pressed wins per button via OR.
@@ -72,6 +78,12 @@ class InputManager {
   }
 
   handle(e, down) {
+    // While the user is typing in a text field (cheat codes, breakpoints,
+    // netplay address…), yield the whole keyboard: Backspace is bound to
+    // rewind, arrows are the d-pad, Enter is Start, X/Z are A/B — all of
+    // which would otherwise make the field unusable.
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (RESERVED.has(e.code)) {
       // Reserve always-on actions; let the browser own the rest (Tab focus etc.)
       if (e.code === 'Tab' || e.code === 'Backspace') {

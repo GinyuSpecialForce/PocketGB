@@ -9,7 +9,89 @@ class DebugView {
     this.ppuEl = document.getElementById('debug-ppu');
     this.vramEl = document.getElementById('vram-view');
     this.vramCtx = this.vramEl ? this.vramEl.getContext('2d') : null;
+    this.disasmEl = document.getElementById('debug-disasm');
+    this.listEl = document.getElementById('disasm-list');
+    this.disasmAddrEl = document.getElementById('disasm-addr');
     this.timer = null;
+    this.followPc = true;
+    this.viewAddr = null; // pinned listing address (null = follow PC)
+  }
+
+  // n instruction lines starting at addr (full-coverage disassembler)
+  disasmLines(addr, n = 12) {
+    const lines = [];
+    let a = addr & 0xFFFF;
+    for (let i = 0; i < n; i++) {
+      const { text, size } = this.disasmInstruction(a);
+      const bp = this.gb._breakpoints && this.gb._breakpoints.has(a) ? '>' : ' ';
+      lines.push(`${bp}${a.toString(16).toUpperCase().padStart(4, '0')}  ${text}`);
+      a = (a + size) & 0xFFFF;
+    }
+    return lines;
+  }
+
+  // Full one-instruction decode → { text, size } (size = bytes consumed)
+  disasmInstruction(addr) {
+    const m = this.gb.mmu;
+    const b = (o) => m.read((addr + o) & 0xFFFF);
+    const w = (o) => b(o) | (b(o + 1) << 8);
+    const h2 = (n) => n.toString(16).toUpperCase().padStart(2, '0');
+    const h4 = (n) => n.toString(16).toUpperCase().padStart(4, '0');
+    const r = (i) => ['B','C','D','E','H','L','(HL)','A'][i];
+    const rp = (i) => ['BC','DE','HL','SP'][i];
+    const rp2 = (i) => ['BC','DE','HL','AF'][i];
+    const cc = (i) => ['NZ','Z','NC','C'][i];
+    const alu = ['ADD A,','ADC A,','SUB ','SBC A,','AND ','XOR ','OR ','CP '];
+    const rot = ['RLC','RRC','RL','RR','SLA','SRA','SWAP','SRL'];
+    const op = b(0);
+    if (op === 0xCB) {
+      const cb = b(1);
+      const x = cb >> 6, y = (cb >> 3) & 7, z = cb & 7;
+      if (x === 0) return { text: `${rot[y]} ${r(z)}`, size: 2 };
+      if (x === 1) return { text: `BIT ${y},${r(z)}`, size: 2 };
+      if (x === 2) return { text: `RES ${y},${r(z)}`, size: 2 };
+      return { text: `SET ${y},${r(z)}`, size: 2 };
+    }
+    const x = op >> 6, y = (op >> 3) & 7, z = op & 7, p = y >> 1;
+    if (x === 0) {
+      if (z === 0) {
+        if (y === 0) return { text: 'NOP', size: 1 };
+        if (y === 1) return { text: 'LD (nn),SP', size: 3 };
+        if (y === 2) return { text: 'STOP', size: 2 };
+        if (y === 3) { const e = (b(1) << 24) >> 24; return { text: `JR ${e >= 0 ? '+' : ''}${e}`, size: 2 }; }
+        if (y >= 4) { const e = (b(1) << 24) >> 24; return { text: `JR ${cc(y - 4)},${e >= 0 ? '+' : ''}${e}`, size: 2 }; }
+      }
+      if (z === 1) return y & 1 ? { text: `ADD HL,${rp(p)}`, size: 1 } : { text: `LD ${rp(p)},$${h4(w(1))}`, size: 3 };
+      if (z === 2) {
+        if (y < 4) return { text: ['LD (BC),A','LD (DE),A','LD (HL+),A','LD (HL-),A'][y], size: 1 };
+        return { text: ['LD A,(BC)','LD A,(DE)','LD A,(HL+)','LD A,(HL-)'][y - 4], size: 1 };
+      }
+      if (z === 3) return { text: `${(y & 1) ? 'DEC' : 'INC'} ${rp(p)}`, size: 1 };
+      if (z === 4) return { text: `INC ${r(y)}`, size: 1 };
+      if (z === 5) return { text: `DEC ${r(y)}`, size: 1 };
+      if (z === 6) return { text: `LD ${r(y)},$${h2(b(1))}`, size: 2 };
+      return { text: ['RLCA','RRCA','RLA','RRA','DAA','CPL','SCF','CCF'][y], size: 1 };
+    }
+    if (x === 1) return op === 0x76 ? { text: 'HALT', size: 1 } : { text: `LD ${r(y)},${r(z)}`, size: 1 };
+    if (x === 2) return { text: `${alu[y]}${r(z)}`, size: 1 };
+    // x === 3
+    if (z === 0) return { text: [`RET ${cc(y)}`,undefined,'JP ${undefined}'][0] || `RET ${cc(y)}`, size: 1 };
+    if (z === 1) {
+      if (y & 1) return { text: ['RETI','LD SP,HL'][y >> 1], size: 1 };
+      return { text: `POP ${rp2(p)}`, size: 1 };
+    }
+    if (z === 2) return { text: `JP ${cc(y)},$${h4(w(1))}`, size: 3 };
+    if (z === 3) {
+      if (y === 0) return { text: `JP $${h4(w(1))}`, size: 3 };
+      if (y === 6) return { text: 'DI', size: 1 };
+      if (y === 7) return { text: 'EI', size: 1 };
+      if (y === 1) return { text: `CB $${h2(b(1))}`, size: 2 }; // handled above normally
+      return { text: `DB $${h2(op)}`, size: 1 };
+    }
+    if (z === 4) return { text: `CALL ${cc(y)},$${h4(w(1))}`, size: 3 };
+    if (z === 5) return (y & 1) ? { text: `DB $${h2(op)}`, size: 1 } : { text: `PUSH ${rp2(p)}`, size: 1 };
+    if (z === 6) return { text: `${alu[y]}$${h2(b(1))}`, size: 2 };
+    return { text: `RST $${h2(y * 8)}`, size: 1 };
   }
 
   start() {
@@ -25,14 +107,25 @@ class DebugView {
   render() {
     const c = this.gb.cpu, p = this.gb.ppu, m = this.gb.mmu;
     const h = (n, w = 2) => n.toString(16).toUpperCase().padStart(w, '0');
+    const bps = this.gb._breakpoints ? this.gb._breakpoints.size : 0;
     this.cpuEl.textContent =
       `A=${h(c.a)} F=${h(c.f)} B=${h(c.b)} C=${h(c.c)} D=${h(c.d)} E=${h(c.e)} H=${h(c.h)} L=${h(c.l)}\n` +
-      `SP=${h(c.sp, 4)} PC=${h(c.pc, 4)}  IME=${c.ime ? 1 : 0} HALT=${c.halted ? 1 : 0}\n` +
+      `SP=${h(c.sp, 4)} PC=${h(c.pc, 4)}  IME=${c.ime ? 1 : 0} HALT=${c.halted ? 1 : 0}${bps ? `  BP=${bps}` : ''}\n` +
       `IE=${h(m.ie)} IF=${h(m.if)}  next: ${this.disasmAt(c.pc)}`;
     this.ppuEl.textContent =
       `LCDC=${h(p.lcdc)} STAT=${h(p.stat)} LY=${p.ly} LYC=${p.lyc} SCY=${p.scy} SCX=${p.scx}\n` +
       `WY=${p.wy} WX=${p.wx} BGP=${h(p.bgp)} OBP0=${h(p.obp0)} OBP1=${h(p.obp1)} mode=${p.mode} dot=${p.dot}`;
     this.renderTiles();
+    this.renderDisasm();
+  }
+
+  renderDisasm() {
+    if (!this.listEl) return;
+    const pc = this.gb.cpu.pc;
+    if (this.followPc) this.viewAddr = pc;
+    const start = (this.viewAddr & 0xFFFF);
+    this.listEl.textContent = this.disasmLines(start, 12).join('\n');
+    this.disasmAddrEl.textContent = `from $${start.toString(16).toUpperCase().padStart(4, '0')}`;
   }
 
   // One-instruction disassembly hint at addr (covers the common opcodes).

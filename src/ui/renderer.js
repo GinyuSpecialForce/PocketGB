@@ -62,6 +62,23 @@ const LCD_FRAG = [
   '}',
 ].join('\n');
 
+// User shader-pack fragment shader (`.pbg-fx`). Preamble uniforms mirror the
+// built-in LCD program; the pack's GLSL is appended verbatim and must assign
+// gl_FragColor. Validated with compileProgram on load; packs that fail to
+// compile are rejected and the built-in LCD program keeps rendering.
+const PACK_FRAG_HEAD = [
+  'precision mediump float;',
+  'uniform sampler2D uTex;',
+  'uniform vec2 uOutPx;',
+  'uniform vec2 uCells;',
+  'uniform float uCurv;',
+  'uniform float uGrid;',
+  'uniform float uSubpx;',
+  'uniform float uScan;',
+  'varying vec2 vCellUV;',
+  'varying vec2 vTexelUV;',
+].join('\n');
+
 const LCD_VERT = [
   'attribute vec2 aPos;',
   'void main() { gl_Position = vec4(aPos, 0.0, 1.0); }',
@@ -117,13 +134,22 @@ class Renderer {
   }
 
   // Lazy WebGL setup: a GL canvas at the visible canvas size + the program.
+  // Builds the shader-pack program when one is loaded, else the built-in LCD
+  // program. A pack that fails to compile is rejected (error surfaced via the
+  // callback) and the built-in keeps rendering.
   _ensureGL() {
-    if (this.gl) return true;
+    const packKey = this.shaderPack ? this.shaderPack.name + '\u0000' + this.shaderPack.glsl : null;
+    if (this.gl && this._glPackId === packKey) return true;
+    if (this.gl) this._glLoss();
     try {
       const glc = document.createElement('canvas');
       glc.width = this.canvas.width; glc.height = this.canvas.height;
       const gl = glc.getContext('webgl', { alpha: false, antialias: false, preserveDrawingBuffer: true });
       if (!gl) return false;
+      const pack = this.shaderPack;
+      const fragSrc = pack
+        ? `${PACK_FRAG_HEAD}\n#define uCellUV vCellUV\n#define uTexelUV vTexelUV\n${pack.glsl}`
+        : LCD_FRAG;
       const compile = (type, src) => {
         const sh = gl.createShader(type);
         gl.shaderSource(sh, src);
@@ -133,7 +159,7 @@ class Renderer {
       };
       const prog = gl.createProgram();
       gl.attachShader(prog, compile(gl.VERTEX_SHADER, LCD_VERT));
-      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, LCD_FRAG));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fragSrc));
       gl.linkProgram(prog);
       if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
       gl.useProgram(prog);
@@ -160,6 +186,7 @@ class Renderer {
       };
       this.glCanvas = glc;
       this.gl = gl;
+      this._glPackId = pack ? pack.name + '\u0000' + pack.glsl : null;
       return true;
     } catch (err) {
       console.error('shader init failed, falling back to 2D:', err);
@@ -168,6 +195,22 @@ class Renderer {
       return false;
     }
   }
+
+  // ---- shader packs (.pbg-fx) ----
+  // pack = { name, glsl } from parseShaderPack(); null/undefined selects the
+  // built-in LCD program. The current GL program rebuilds lazily on next
+  // present() when the pack changes (hot-reload friendly). Change detection
+  // keys on NAME + GLSL: a hot-reload edits the file but keeps the name, and
+  // that must still rebuild the program.
+  setShaderPack(pack) {
+    const key = (p) => (p ? p.name + '\u0000' + p.glsl : null);
+    const changed = key(pack) !== key(this.shaderPack);
+    this.shaderPack = pack || null;
+    if (changed && this.gl) this._glPackId = undefined; // force program rebuild
+  }
+
+  get shaderPackError() { return this._packError || null; }
+  set shaderPackError(v) { this._packError = v; }
 
   // Pre-render the 2D-path scanline overlay once (every other row darkened ~18%).
   _buildScanlines() {
@@ -250,21 +293,22 @@ class Renderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.offscreen);
     // shader knobs: grid + subpixel stripes always on with the shader;
     // curvature honors its own toggle; scanlines move into the shader.
-    const cells = 1;
+    // An active pack's uniform overrides win over the defaults.
+    const ov = this.shaderPack ? packUniformOverrides(this.shaderPack) : null;
     gl.uniform2f(this.glUniform.outPx, this.glCanvas.width, this.glCanvas.height);
     gl.uniform2f(this.glUniform.cells, 160, 144);
-    gl.uniform1f(this.glUniform.curv, this.effects.curvature ? 1.0 : 0.0);
-    gl.uniform1f(this.glUniform.grid, 0.35);
+    gl.uniform1f(this.glUniform.curv, ov && ov.curv !== undefined ? ov.curv : this.effects.curvature ? 1.0 : 0.0);
+    gl.uniform1f(this.glUniform.grid, ov && ov.grid !== undefined ? ov.grid : 0.35);
     // subpixel stripes only make sense when a cell spans >= 3 device px
     const cellPx = Math.min(this.glCanvas.width / 160, this.glCanvas.height / 144);
-    gl.uniform1f(this.glUniform.subpx, cellPx >= 3 ? 0.5 : 0.0);
-    gl.uniform1f(this.glUniform.scan, this.effects.scanlines ? 1.0 : 0.0);
+    const autoSubpx = cellPx >= 3 ? 0.5 : 0.0;
+    gl.uniform1f(this.glUniform.subpx, ov && ov.subpx !== undefined ? ov.subpx : autoSubpx);
+    gl.uniform1f(this.glUniform.scan, ov && ov.scan !== undefined ? ov.scan : this.effects.scanlines ? 1.0 : 0.0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     // composite the GL result onto the visible canvas
     const ctx = this.ctx;
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(this.glCanvas, 0, 0, this.canvas.width, this.canvas.height);
-    void cells;
   }
 
   drawBlank() {
@@ -275,6 +319,9 @@ class Renderer {
   }
 }
 
+// packUniformOverrides is defined in shader-pack.js (loaded before renderer.js
+// in index.html; under Node the test harness requires it directly).
+
 // Expand BGR555 to an xRGB888 canvas pixel (little-endian ABGR packing)
 function rgb555to888(c) {
   const r5 = c & 0x1F, g5 = (c >> 5) & 0x1F, b5 = (c >> 10) & 0x1F;
@@ -282,4 +329,13 @@ function rgb555to888(c) {
   return 0xFF000000 | (b << 16) | (g << 8) | r;
 }
 
-if (typeof module !== 'undefined') module.exports = { Renderer, DMG_PALETTE };
+if (typeof module !== 'undefined' && typeof __dirname !== 'undefined') {
+  // Under Node (tests) pull packUniformOverrides from shader-pack.js; in the
+  // browser it arrives as a global because shader-pack.js loads first. Resolve
+  // via globalThis (never a bare identifier): a bare `typeof X` throws if any
+  // outer scope holds a TDZ binding named X — exactly the classic-script
+  // collision class this codebase guards against.
+  const _pvo = globalThis.packUniformOverrides
+    || require('./shader-pack').packUniformOverrides;
+  module.exports = { Renderer, DMG_PALETTE, packUniformOverrides: _pvo };
+}

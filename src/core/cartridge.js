@@ -1,5 +1,6 @@
 // PocketGB — cartridge parsing and memory bank controllers (MBC0/1/3/5 + RTC)
 'use strict';
+const _extractRomTitle = (typeof extractRomTitle !== 'undefined') ? extractRomTitle : require('./romtitle').extractRomTitle;
 
 class Cartridge {
   constructor(rom) {
@@ -20,7 +21,28 @@ class Cartridge {
     this.rtc = { sec: 0, min: 0, hour: 0, dl: 0, secLatched: 0, minLatched: 0, hourLatched: 0, dlLatched: 0, latched: false, base: Date.now(), halt: false, dayCarry: false };
     this.rtcDirty = false;
     this.rtcTimer = null;
+    this.rtcRate = 1; // 1 = real time; higher = clock fast-forwards (day/night grinding)
     this.startRtcClock();
+  }
+
+  // ---- RTC control (time-travel for MBC3 games) ----
+  setRtcRate(rate) {
+    this.rtcRate = Math.max(1, Math.min(3600, Math.floor(rate) || 1));
+  }
+  // Set the wall clock outright; values are clamped to hardware ranges.
+  setRtcTime({ sec, min, hour, dl }) {
+    if (Number.isFinite(sec)) this.rtc.sec = Math.max(0, Math.min(59, sec | 0));
+    if (Number.isFinite(min)) this.rtc.min = Math.max(0, Math.min(59, min | 0));
+    if (Number.isFinite(hour)) this.rtc.hour = Math.max(0, Math.min(23, hour | 0));
+    if (Number.isFinite(dl)) {
+      this.rtc.dl = Math.max(0, Math.min(0x1FF, dl | 0));
+      this.rtc.dayCarry = false;
+    }
+    this.rtc.base = Date.now();
+    this.rtcDirty = true;
+  }
+  getRtcTime() {
+    return { sec: this.rtc.sec, min: this.rtc.min, hour: this.rtc.hour, dl: this.rtc.dl, halt: !!this.rtc.halt, dayCarry: !!this.rtc.dayCarry };
   }
 
   parseHeader() {
@@ -42,20 +64,27 @@ class Cartridge {
     this.hasRumble = (cartType >= 0x1C && cartType <= 0x1E);
 
     const t = cartType;
-    this.mbc = (t === 0x00) ? 0
+    this.mbc = (t === 0x00 || t === 0x08 || t === 0x09) ? 0
       : (t >= 0x01 && t <= 0x03) ? 1
       : (t === 0x05 || t === 0x06) ? 2
       : (t >= 0x0F && t <= 0x13) ? 3
-      : (t >= 0x19 && t <= 0x1E) ? 5
+      : (t === 0x1F || (t === 0x19 && this.numRomBanks > 128)) ? 30  // MBC30 (big Crystal hacks)
+      : (t >= 0x19 && t <= 0x22) ? 5                                  // incl. MBC7 → MBC5 approximation
+      : (t === 0xFC || t === 0xFD) ? 'HUC1'                           // GB Camera / HuC1
+      : (t === 0xFE) ? 'HUC3'
       : 1;
-    // Fallback heuristic for headers that lie (homebrew): ROM-only + big + RAM = MBC5
-    if (this.mbc === 0 && this.numRomBanks > 2 && this.ramSize > 0) this.mbc = 5;
+    // MBC1M multicarts (e.g. 240-in-1): MBC1 header but more than 32 banks —
+    // behave as MBC1 permanently in mode 1 (bank2 selects the 512 KB group).
+    this.mbc1m = (this.mbc === 1 && this.numRomBanks > 32);
+    this.onRumble = null; // set by the UI layer → gamepad vibrationActuator
 
-    this.title = '';
-    for (let i = 0x134; i <= 0x142; i++) { const ch = r[i]; if (ch >= 32 && ch < 127) this.title += String.fromCharCode(ch); }
-    this.title = this.title.trim();
+    this.title = _extractRomTitle(r);
+    // Game Boy Camera (Pocket Camera) uses HuC-1; the title is the practical
+    // detector since cart-type codes don't distinguish it reliably.
+    this.hasCamera = /GAME\s*CAMERA|POCKET\s*CAMERA/i.test(this.title);
     this.cgbFlag = r[0x143];
     this.isGBC = this.cgbFlag === 0xC0;
+    this.region = r[0x14A]; // 0 = Japan, 1 = Overseas (header editor exposes this)
   }
 
   // ---- battery RAM ----
@@ -93,10 +122,13 @@ class Cartridge {
     if (this.rtcTimer) clearInterval(this.rtcTimer);
     this.rtcTimer = setInterval(() => {
       if (this.rtc.halt) return;
-      this.rtc.sec++;
-      if (this.rtc.sec >= 60) { this.rtc.sec = 0; this.rtc.min++; }
-      if (this.rtc.min >= 60) { this.rtc.min = 0; this.rtc.hour++; }
-      if (this.rtc.hour >= 24) { this.rtc.hour = 0; this.rtc.dl++; }
+      let s = this.rtc.sec + (this.rtcRate | 0);
+      this.rtc.sec = s % 60;
+      this.rtc.min += (s / 60) | 0;
+      this.rtc.hour += (this.rtc.min / 60) | 0;
+      this.rtc.min %= 60;
+      this.rtc.dl += (this.rtc.hour / 24) | 0;
+      this.rtc.hour %= 24;
       if (this.rtc.dl > 0x1FF) { this.rtc.dl = 0; this.rtc.dayCarry = true; }
       this.rtcDirty = true;
     }, 1000);
@@ -106,8 +138,6 @@ class Cartridge {
 
   latchRtc(data) {
     if (data & 1) {
-      const now = (Date.now() - this.rtc.base) / 1000;
-      // advance from base then latch (keeps continuity with the 1s timer)
       this.rtc.secLatched = this.rtc.sec; this.rtc.minLatched = this.rtc.min;
       this.rtc.hourLatched = this.rtc.hour; this.rtc.dlLatched = this.rtc.dl;
       this.rtc.latched = true;
@@ -149,17 +179,44 @@ class Cartridge {
         }
         return;
       }
-      case 3: {
+      case 3:
+      case 30: {
+        if (a < 0x2000) { this.ramEnabled = (v & 0xF) === 0xA; return; }
+        if (a < 0x4000) {
+          // MBC30: 9-bit bank like big MBC3 hacks — low byte at 2000, bit 8
+          // held in ramBank (games write 0x10 there first) or OR'd directly.
+          this.romBank = this.mbc === 30 ? ((this.romBank & 0x100) | (v & 0xFF)) : (v & 0x7F);
+          return;
+        }
+        if (a < 0x6000) {
+          this.ramBank = v & 0x0F;
+          if (this.mbc === 30) this.romBank = (this.romBank & 0xFF) | ((v & 0x01) << 8); // hack convention: bit0 of 4000 = bank bit 8
+          return;
+        }
+        this.latchRtc(v); return;
+      }
+      case 'HUC1': {
+        // HuC1 banking ≈ MBC1 (simple register set)
+        if (a < 0x2000) { this.ramEnabled = (v & 0xF) === 0xA; return; }
+        if (a < 0x4000) { this.romBank = v & 0x3F; return; }
+        if (a < 0x6000) { this.ramBank = v & 0x03; return; }
+        return;
+      }
+      case 'HUC3': {
         if (a < 0x2000) { this.ramEnabled = (v & 0xF) === 0xA; return; }
         if (a < 0x4000) { this.romBank = v & 0x7F; return; }
-        if (a < 0x6000) { this.ramBank = v & 0x0F; return; }
-        this.latchRtc(v); return;
+        if (a < 0x6000) { this.ramBank = v & 0x0F; return; } // IR regs unimplemented (no hardware to talk to)
+        return;
       }
       case 5: {
         if (a < 0x2000) { this.ramEnabled = (v & 0xF) === 0xA; return; }
         if (a < 0x3000) { this.romBank = (this.romBank & 0x100) | (v & 0xFF); return; }
         if (a < 0x4000) { this.romBank = (this.romBank & 0xFF) | ((v & 1) << 8); return; }
-        if (a < 0x6000) { this.ramBank = v & 0x0F; return; }
+        if (a < 0x6000) {
+          this.ramBank = v & 0x0F;
+          if (this.hasRumble && this.onRumble) this.onRumble(!!(v & 0x08)); // bit 3 = rumble motor
+          return;
+        }
         return;
       }
     }
@@ -168,15 +225,17 @@ class Cartridge {
   readRom(addr) {
     // addr in 0x0000-0x7FFF
     let bank;
+    const mbc1mode1 = this.mbc === 1 && (this.mode === 1 || this.mbc1m);
     if (addr < 0x4000) {
       bank = 0;
-      if (this.mbc === 1 && this.mode === 1) bank = (this.bank2 << 5) % this.numRomBanks;
+      if (mbc1mode1) bank = (this.bank2 << 5) % this.numRomBanks;
     } else {
       let b = this.romBank;
-      if (this.mbc === 1) b |= (this.mode === 1 ? this.bank2 << 5 : 0);
-      bank = b % this.numRomBanks;
+      if (mbc1mode1) b = ((this.bank2 << 5) | (b & 0x1F)) % this.numRomBanks;
+      else bank = b % this.numRomBanks;
+      if (mbc1mode1) bank = b;
       // MBC1/2/3 skip bank 0 in the switchable area (maps to 1); MBC5 may map 0 legally
-      if (bank === 0 && this.mbc !== 5 && this.mbc !== 0) bank = 1 % this.numRomBanks;
+      if (bank === 0 && this.mbc !== 5 && this.mbc !== 0 && this.mbc !== 'HUC1') bank = 1 % this.numRomBanks;
     }
     const arr = this.romBanks[bank] || this.romBanks[0];
     const romByte = arr[addr & 0x3FFF];
@@ -188,7 +247,7 @@ class Cartridge {
   }
 
   readRam(addr) {
-    if (this.mbc === 3 && this.ramBank >= 0x08 && this.ramBank <= 0x0C) {
+    if ((this.mbc === 3 || this.mbc === 30 || this.mbc === 'HUC3') && this.ramBank >= 0x08 && this.ramBank <= 0x0C) {
       if (!this.rtc.latched) { // live read
         this.latchRtc(1); // latch current values
         this.rtc.latched = false; // but keep live semantics per-read
@@ -199,6 +258,12 @@ class Cartridge {
       return this.rtcRegister();
     }
     if (!this.ramEnabled || this.ramSize === 0) return 0xFF;
+    // Game Boy Camera (HuC-1): photo registers live at A000-B006. Only
+    // register 0 (unlock) matters to software; photos are stored as cart RAM.
+    if (this.hasCamera && addr - 0xA000 <= 6) {
+      const r = addr - 0xA000;
+      return [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][r]; // unlocked status
+    }
     if (this.mbc === 2) { // MBC2 built-in 512x4 RAM
       const idx = (addr - 0xA000) & 0x1FF;
       return this.ram[idx] & 0x0F;

@@ -1,8 +1,13 @@
 // PocketGB — cheat engine: GameShark (RAM writes) + Game Genie (ROM patches)
 //
-// GameShark GB format: 01XXXXYY (+ optional 2 trailing clock-speed digits, ignored).
-//   XXXX = RAM address (WRAM 0xC000-0xDFFF or cart RAM 0xA000-0xBFFF),
-//   YY   = value written continuously (applied once per frame).
+// GameShark GB format: TTVVLLHH — 8 hex digits:
+//   TT      = device bank tag — IGNORED (mGBA discards it too). Most codes
+//             use '01', but real published codes use other tags, e.g. Super
+//             Mario Bros. Deluxe "Disable All Enemies" = 9120D2D2.
+//   VV      = value written continuously,
+//   LL HH   = address, little-endian (low byte first!). Pan Docs example:
+//   010238CD → write 0x02 at 0xCD38 ('38' low, 'CD' high).
+// Dashes/spaces are ignored.
 //
 // Game Genie GB format: XXXYYY or XXXYYYZZZ (dashes/spaces allowed).
 //   Nibbles: [0..5] required, [6..8] optional compare.
@@ -14,15 +19,14 @@
 
 const HEX = /^[0-9A-F]+$/;
 
-// Parse a GameShark code → { addr, value } or null.
+// Parse a GameShark code → { addr, value, bank } or null.
 function parseGameShark(raw) {
   const s = String(raw).toUpperCase().replace(/[^0-9A-F]/g, '');
   if (s.length !== 8 || !HEX.test(s)) return null;
-  if (s.slice(0, 2) !== '01') return null; // GB RAM write tag
-  const addr = parseInt(s.slice(2, 6), 16);
-  const value = parseInt(s.slice(6, 8), 16);
-  if (addr < 0x8000) return null; // device writes RAM only, never ROM
-  return { addr, value };
+  const value = parseInt(s.slice(2, 4), 16);
+  const addr = parseInt(s.slice(6, 8) + s.slice(4, 6), 16); // address is little-endian
+  if (addr < 0x8000) return null; // GameShark writes RAM only, never ROM/registers
+  return { addr, value, bank: parseInt(s.slice(0, 2), 16) }; // bank tag kept for display
 }
 
 // Parse a Game Genie code → { addr, value, compare|null } or null.
@@ -63,7 +67,7 @@ class CheatEngine {
       this.ggCodes.push(entry);
       return entry;
     }
-    return { error: 'Not a valid GameShark (01XXXXYY) or Game Genie (XXXYYY[ZZZ]) code' };
+    return { error: 'Not a valid GameShark (8 hex digits: value + address, e.g. 010238CD) or Game Genie (XXXYYY[ZZZ]) code' };
   }
 
   remove(index) {

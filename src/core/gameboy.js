@@ -28,7 +28,7 @@ class GameBoy {
 
   requestInterrupt(bit) { this.cpu.mmu && this.cpu.mmu.requestInterrupt(bit); }
 
-  loadROM(bytes, saveData, forceDmg) {
+  loadROM(bytes, saveData, forceDmg, bootBytes) {
     if (this.cart) this.cart.dispose();
     this.cart = new _Cartridge(bytes);
     this.cart.cheats = this.cheats; // Game Genie patches read from this cart
@@ -47,6 +47,18 @@ class GameBoy {
     this.mmu.wram = new Uint8Array(cgbWram);
     this.mmu.serial = this.serial;
     this.mmu.cgb = cgb;
+    // Optional authentic boot ROM (user-supplied dump): DMG (256 B) maps at
+    // 0000-00FF; CGB (2 KB, incl. the color intro) maps at 0000-08FF. Without
+    // one the CPU starts at the post-boot state (built-in fast boot).
+    const boot = bootBytes && bootBytes.length >= 0x100 ? bootBytes : null;
+    this.mmu.bootrom = boot;
+    this.mmu.bootromDisabled = !boot;
+    if (boot) {
+      this.cpu.a = 0; this.cpu.f = 0; this.cpu.b = 0; this.cpu.c = 0;
+      this.cpu.d = 0; this.cpu.e = 0; this.cpu.h = 0; this.cpu.l = 0;
+      this.cpu.sp = 0; this.cpu.pc = 0;
+      this.cpu.ime = false; this.cpu.imeDelay = false; this.cpu.halted = false;
+    }
     this.cpu.mmu = this.mmu;
     this.ppu.mmu = this.mmu; // HDMA source reads
     this.resetComponents();
@@ -167,6 +179,22 @@ class GameBoy {
   // Advance the machine by one rendered frame (70224 m-cycles). Returns the
   // framebuffer when a new frame completes: Uint8Array of 160*144 shade
   // indices on DMG, Uint32Array of BGR555 colors on CGB.
+  // ---- debugger hooks ----
+  // breakpoints: Set of addresses checked before each CPU step. stepFrames()
+  // runs instructions (with breakpoints honored) while video keeps rendering.
+  get breakpoints() { return this._breakpoints || (this._breakpoints = new Set()); }
+  addBreakpoint(addr) { this.breakpoints.add(addr & 0xFFFF); }
+  removeBreakpoint(addr) { this.breakpoints.delete(addr & 0xFFFF); }
+  clearBreakpoints() { if (this._breakpoints) this._breakpoints.clear(); }
+
+  stepInstruction() {
+    // one CPU step with full component ticking (slower than runFrame's loop
+    // but identical semantics); returns m-cycles consumed
+    const cycles = this._cpuStep ? this._cpuStep() : this.cpu.step();
+    if (this._tickParts) this._tickParts(this.cpu.doubleSpeed ? cycles * 2 : cycles);
+    return cycles;
+  }
+
   runFrame() {
     if (!this.cart || !this.mmu) return null;
     const fb = this.ppu.colorFramebuffer || this.ppu.framebuffer;
@@ -178,7 +206,9 @@ class GameBoy {
     // CPU runs twice as fast, so it gets twice as many cycles and the timed
     // components see half as many of their base-rate ticks (tickParts halves).
     let budget = 70224;
+    const bps = this._breakpoints;
     while (budget > 0) {
+      if (bps && bps.has(this.cpu.pc)) break; // debugger: halt at the breakpoint
       // cpu.step handles HALT and STOP internally (cheap wait path + interrupt wake).
       let cycles = cpuStep();
       const master = this.cpu.doubleSpeed ? Math.max(1, cycles >> 1) : cycles;

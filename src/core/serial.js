@@ -24,7 +24,7 @@ class Serial {
     this.sb = 0x00;            // FF01
     this.sc = 0x7E;            // FF02 (bits 6..1 read as 1 on DMG)
     this._state = ST_IDLE;
-    this.  _counter = 0;              // T-cycles to the next state transition
+    this._counter = 0;                // T-cycles to the next state transition
     this._armed = false;       // slave transfer waiting for the peer's clock
     this._pendingPeer = null;  // peer byte received during the master transfer
     // transport hooks (set by the UI layer)

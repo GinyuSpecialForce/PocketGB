@@ -392,7 +392,8 @@ class CPU {
 
     if (base >= 0x40 && base <= 0x7F) { // BIT
       this.bit(v, bit);
-      return cycles;
+      // DMG: BIT n,(HL) costs 12T (3 m-cycles), one less than other (HL) CB ops
+      return isHL ? 12 : 8;
     }
     if (base >= 0x80 && base <= 0xBF) { // RES
       v = this.res(v, bit);

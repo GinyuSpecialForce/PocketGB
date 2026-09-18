@@ -30,6 +30,8 @@ class MMU {
 
   read(a) {
     a &= 0xFFFF;
+    // Boot ROM maps at 0000-00FF (DMG) or 0000-08FF (CGB) until FF50 unlocks it
+    if (this.bootrom && !this.bootromDisabled && a < (this.cgb ? 0x900 : 0x100)) return this.bootrom[a];
     if (a < 0x8000) return this.cart.readRom(a);
     if (a < 0xA000) return this.ppu.readVRAM(a);
     if (a < 0xC000) return this.cart.readRam(a);
@@ -158,10 +160,10 @@ class MMU {
       case 0xFF00: this.joypad.write(v); return;
       case 0xFF01: if (this.serial) this.serial.writeSB(v); return;
       case 0xFF02: if (this.serial) this.serial.writeSC(v); return;
-      case 0xFF04: this.timer.div = 0; return;
-      case 0xFF05: this.timer.tima = v; return;
+      case 0xFF04: this.timer.writeDIV(); return;
+      case 0xFF05: this.timer.writeTIMA(v); return;
       case 0xFF06: this.timer.tma = v; return;
-      case 0xFF07: this.timer.tac = v & 0x07; return;
+      case 0xFF07: this.timer.writeTAC(v & 0x07); return;
       case 0xFF0F: this.if = v & 0x1F; return;
       case 0xFF40: this.ppu.writeLCDC(v); return;
       case 0xFF41: this.ppu.writeSTAT(v); return;
@@ -175,7 +177,7 @@ class MMU {
       case 0xFF49: this.ppu.obp1 = v; return;
       case 0xFF4A: this.ppu.writeWY(v); return; // mid-scanline flush
       case 0xFF4B: this.ppu.writeWX(v); return; // mid-scanline flush
-      case 0xFF50: this.bootromDisabled = true; return;
+      case 0xFF50: this.bootromDisabled = true; return; // any write unlocks
       case 0xFF4D: if (this.cgb) this.cpu.speedSwitchArmed = !!(v & 1); return;
     }
     if (a >= 0xFF10 && a <= 0xFF3F) { this.apu.write(a, v); return; }
