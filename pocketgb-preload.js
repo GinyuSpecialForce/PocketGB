@@ -25,7 +25,6 @@ contextBridge.exposeInMainWorld('pocketgb', {
   openPath: (p) => ipcRenderer.invoke('open-path', p),
   openRomPath: (p) => ipcRenderer.send('open-rom-path', p),
   saveFile: (name, b64) => ipcRenderer.invoke('save-file', name, b64),
-  writeRomHeader: (path, patch) => ipcRenderer.invoke('write-rom-header', path, patch),
   saveShot: (key, b64) => ipcRenderer.invoke('save-shot', key, b64),
   listShots: (key) => ipcRenderer.invoke('list-shots', key),
   readShot: (key, file) => ipcRenderer.invoke('read-shot', key, file),
