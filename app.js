@@ -54,6 +54,7 @@ input.onHotkey((action) => {
   else if (action === 'cheats') toggleOverlay('ov-cheats');
   else if (action === 'effects') toggleOverlay('ov-effects');
   else if (action === 'keys') { renderBinds(); toggleOverlay('ov-keys'); }
+  else if (action === 'practice-reset') practiceHotReset();
 });
 
 // ---- link cable ----
@@ -128,8 +129,9 @@ function doLinkStop() {
 
 // the menu overlay has two panels: the button grid and the link-cable form
 function showMenuPanel(id) {
-  $('menu-panel').classList.toggle('hidden', id === 'link-panel');
-  $('link-panel').classList.toggle('hidden', id !== 'link-panel');
+  // panel switcher inside ov-menu: hide every box, show the requested one
+  document.querySelectorAll('#ov-menu .box').forEach((b) => b.classList.add('hidden'));
+  $(id).classList.remove('hidden');
 }
 $('btn-link').addEventListener('click', () => { updateLinkStatus(); showMenuPanel('link-panel'); });
 $('link-back').addEventListener('click', () => showMenuPanel('menu-panel'));
@@ -139,11 +141,33 @@ $('link-stop').addEventListener('click', doLinkStop);
 $('link-close').addEventListener('click', () => { toggleOverlay('ov-menu'); showMenuPanel('menu-panel'); });
 $('btn-more').addEventListener('click', () => { showMenuPanel('menu-panel'); toggleOverlay('ov-menu'); });
 $('menu-close').addEventListener('click', () => toggleOverlay('ov-menu'));
-// Escape closes whichever overlay is open (bind-capture handles its own Escape)
+// ---- menu launchpad: category tiles → submenu panels (swap in place) ----
+const MENU_SUBS = { 'cat-game': 'sub-game', 'cat-options': 'sub-options', 'cat-capture': 'sub-capture', 'cat-hardware': 'sub-hardware' };
+function openMenuSub(id) {
+  document.querySelectorAll('#ov-menu .box').forEach((b) => b.classList.add('hidden'));
+  $(id).classList.remove('hidden');
+}
+for (const [tile, sub] of Object.entries(MENU_SUBS)) {
+  $(tile).addEventListener('click', () => openMenuSub(sub));
+  $(tile).addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openMenuSub(sub); } });
+}
+// every submenu's ‹ menu breadcrumb + back button return to the launchpad
+for (const sub of Object.values(MENU_SUBS)) {
+  const back = $(sub.replace('sub-', 'back-'));
+  if (back) back.addEventListener('click', () => openMenuSub('menu-panel'));
+  $(`${sub}-back`).addEventListener('click', () => openMenuSub('menu-panel'));
+  $(`${sub}-close`).addEventListener('click', () => { toggleOverlay('ov-menu'); openMenuSub('menu-panel'); });
+}
+// Escape closes whichever overlay is open (bind-capture handles its own Escape);
+// in the menu it goes BACK a level first, then closes.
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   const open = document.querySelector('.overlay.open');
   if (!open) return;
+  if (open.id === 'ov-menu') {
+    const hidden = $('menu-panel').classList.contains('hidden');
+    if (hidden) { openMenuSub('menu-panel'); return; } // submenu → back to launchpad
+  }
   toggleOverlay(open.id);
   if (open.id === 'ov-debug') debug.stop();
   if (open.id === 'ov-menu') showMenuPanel('menu-panel');
@@ -216,6 +240,24 @@ function loop(t) {
       if (mask === null) { setStatus('movie finished'); }
       else gb.joypad.setState(window.PocketMovie.maskToState(mask));
     }
+    // ghost racer steps its own machine every produced frame so both
+    // timelines advance at the same rate; blit() routes the framebuffer to
+    // the ghost PiP panel (a separate canvas beside the game, never on top)
+    if (ghost && ghost.active) {
+      const gfb = ghost.step(0);
+      if (gfb) renderer.ghostFrame = gfb;
+      const pct = $('ghost-progress');
+      if (pct) pct.textContent = `${Math.round(ghost.progress * 100)}%`;
+      if (ghost.done) {
+        // attempt over: keep the panel for the final picture, re-arm so the
+        // next reset (F8) starts the next race
+        ghost.hold();
+        $('ghost-progress').textContent = 'armed';
+        $('ghost-pip-label').textContent = 'ghost · armed';
+        setStatus('ghost finished — you win');
+      }
+    }
+    if (heatmap) heatmap.sample(gb.cpu.pc);
     const fb = gb.runFrame();
     if (movieRecorder.recording) {
       movieRecorder.observe(window.PocketMovie.stateToMask(input.state));
@@ -230,6 +272,8 @@ function loop(t) {
     }
   }
   rewind.update(t);
+  practice.onFrame();
+  renderInputDisplay();
 
   if (t - fpsLast >= 500) {
     fps = Math.round(framesThisSecond * 1000 / (t - fpsLast));
@@ -281,6 +325,99 @@ $('btn-movie-play').addEventListener('click', () => {
   inp.click();
 });
 
+// ---- cartridge heatmap ----
+let heatmap = null;
+function renderHeatmap() {
+  const cv = $('heat-canvas');
+  const sum = $('heat-summary');
+  if (!cv || !heatmap) return;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#151317';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  const snaps = heatmap.snapshot();
+  if (!snaps.length) { sum.textContent = 'no samples yet'; return; }
+  const banks = snaps.map((s) => s.bank);
+  const maxBank = Math.max(...banks, 2);
+  const rows = maxBank + 1;
+  const rowH = Math.max(2, Math.floor(cv.height / rows));
+  const cellsPerRow = Math.floor(cv.width / 2); // 512/2 = 256 buckets
+  let maxHit = 1;
+  for (const s of snaps) if (s.hot > maxHit) maxHit = s.hot;
+  snaps.forEach((s, ri) => {
+    const y = s.bank * rowH;
+    for (let i = 0; i < s.buckets.length && i < cellsPerRow; i++) {
+      const h = s.buckets[i];
+      if (!h) continue;
+      const t = Math.min(1, Math.log2(1 + h) / Math.log2(1 + maxHit));
+      // dark purple → magenta → amber heat ramp
+      const r = Math.floor(40 + 215 * t);
+      const g = Math.floor(10 + 150 * t * t);
+      const b = Math.floor(60 + 60 * (1 - t));
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(i * 2, y, 2, rowH);
+    }
+  });
+  const total = snaps.reduce((n, s) => n + s.touched, 0);
+  sum.textContent = `${heatmap.frames} samples — ${snaps.length} bank(s) executed, ${total} hot regions; hottest: bank ${snaps[0].bank}`;
+}
+$('heat-clear').addEventListener('click', () => { if (heatmap) { heatmap.reset(); renderHeatmap(); setStatus('heatmap cleared'); } });
+
+// ---- ghost racer (race a translucent replay of your own recorded run) ----
+const ghost = window.PocketGhost ? new window.PocketGhost.GhostRacer(gb) : null;
+$('btn-ghost').addEventListener('click', () => {
+  if (!romLoaded || !ghost) { setStatus('load a game first'); return; }
+  if (ghost.active || ghost.armed) {
+    ghost.stop();
+    renderer.ghostFrame = null;
+    $('ghost-status').classList.remove('on');
+    $('ghost-pip').classList.remove('on');
+    $('ghost-startnow').textContent = 'start now';
+    setStatus('ghost race ended');
+    return;
+  }
+  // fresh input each pick: re-selecting the same file fires no `change` on a
+  // reused input (classic file-picker gotcha)
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.pgm';
+  inp.style.display = 'none';
+  document.body.appendChild(inp);
+  inp.addEventListener('change', async () => {
+    const f = inp.files && inp.files[0];
+    inp.remove();
+    if (!f) return;
+    const buf = await f.arrayBuffer();
+    const err = ghost.load(new Uint8Array(buf)); // loads + ARMS (does not move)
+    if (err) { setStatus(err); return; }
+    $('ghost-status').classList.add('on');
+    $('ghost-pip').classList.add('on');
+    $('ghost-startnow').textContent = 'start now';
+    $('ghost-progress').textContent = 'armed';
+    $('ghost-pip-label').textContent = 'ghost · armed';
+    setStatus('ghost armed — press reset (or F8) to start the race together, or "start now" to begin from the recording anchor');
+  });
+  inp.click();
+});
+
+// Race banner buttons: launch now from the anchor, or disarm entirely.
+$('ghost-startnow').addEventListener('click', () => {
+  if (!ghost || !ghost.waitingForReset) { setStatus('no ghost armed'); return; }
+  const err = ghost.startNow();
+  if (err) { setStatus(err); return; }
+  $('ghost-startnow').textContent = 'restart';
+  $('ghost-progress').textContent = '0%';
+  $('ghost-pip-label').textContent = 'ghost';
+  setStatus('ghost race on — both timelines start from the recording anchor');
+});
+$('ghost-cancel').addEventListener('click', () => {
+  if (!ghost) return;
+  ghost.stop();
+  renderer.ghostFrame = null;
+  $('ghost-status').classList.remove('on');
+  $('ghost-pip').classList.remove('on');
+  $('ghost-startnow').textContent = 'start now';
+  setStatus('ghost disarmed');
+});
+
 // ---- debugger controls ----
 function dbgPause() { dbgRunning = false; setPaused(true); }
 function dbgStep(n = 1) {
@@ -321,6 +458,13 @@ function setTurbo(on) {
 }
 function setRewinding(on) {
   rewinding = on && romLoaded;
+  // Rewinding time-travels the live machine; the ghost cannot follow its own
+  // timeline backwards, so the attempt ends and re-arms (next reset relaunches).
+  if (on && ghost && ghost.active) {
+    ghost.hold();
+    $('ghost-progress').textContent = 'armed';
+    $('ghost-pip-label').textContent = 'ghost · armed';
+  }
   if (on) audio.setMuted(true);
   else { audio.setMuted(muted); setStatus(`${fps} fps`); }
 }
@@ -352,6 +496,13 @@ async function loadRom(info) {
     }
   }
   const savData = info.savePath ? await window.pocketgb.readSav(info.savePath) : null;
+  // fresh game: stop any run-scoped features tied to the previous ROM
+  if (ghost && ghost.active) { ghost.stop(); renderer.ghostFrame = null; }
+  const gstat = $('ghost-status'); if (gstat) gstat.classList.remove('on');
+  const gpip = $('ghost-pip'); if (gpip) gpip.classList.remove('on');
+  if (moviePlayer) { moviePlayer.reset(); }
+  if (movieRecorder && movieRecorder.recording) { movieRecorder.recording = false; $('btn-movie-rec').textContent = 'record movie'; }
+  capture.resetHistory();
   // authentic boot ROM (user-supplied dump), cached from a previous session
   let bootBytes = null;
   try {
@@ -359,6 +510,8 @@ async function loadRom(info) {
     if (b64) bootBytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   } catch { bootBytes = null; }
   gb.loadROM(romBytes, savData ? new Uint8Array(savData) : null, forceDmg, bootBytes);
+  renderer.setSGB(gb.sgb || null);
+  heatmap = window.PocketHeat ? new window.PocketHeat.CartridgeHeatmap(gb.cart) : null;
   romLoaded = true;
   paused = false;
   rewinding = false;
@@ -422,14 +575,115 @@ function resetGame() {
   if (!romLoaded) return;
   const romBytes = gb.cart.rom;
   const sav = gb.cart.battery ? gb.cart.serializeSav() : null;
-  gb.loadROM(romBytes, sav, forceDmg);
+  // reuse the boot ROM the game was loaded with (gb._bootBytes) so an in-app
+  // reset replays the authentic boot sequence, not the generated animation
+  gb.loadROM(romBytes, sav, forceDmg, gb._bootBytes || null);
+  renderer.setSGB(gb.sgb || null);
+  heatmap = window.PocketHeat ? new window.PocketHeat.CartridgeHeatmap(gb.cart) : null;
+  renderHeatmap();
   rewind.reset();
-  setStatus('reset');
+  practice.onReset(); // loadless timing: the timer restarts on hard reset
+  // the starting gun: an armed ghost launches with this reset so both
+  // timelines (and the timer) begin at the same moment
+  if (ghost && ghost.waitingForReset) {
+    const err = ghost.startNow();
+    if (!err) {
+      $('ghost-progress').textContent = '0%';
+      $('ghost-pip-label').textContent = 'ghost';
+      setStatus('reset — ghost race started');
+    }
+  } else setStatus('reset');
+}
+
+// ---- speedrun practice kit ----
+// Loadless timer anchored to hard resets, per-frame counter, and a toggleable
+// in-game HUD (timer + best split + frames + input display) that stays on
+// screen while you play. NOTE: the ms clock formatter is named fmtMS — the
+// game clock panel already owns `fmtClock` in this shared classic-script
+// scope, and a second `function fmtClock` silently shadows it (that bug made
+// the timer read "day NaN, undefined:undefined:undefined").
+const practice = {
+  running: false,
+  hudOn: false,
+  startedAt: 0,        // performance.now() when the current attempt began
+  elapsed: 0,          // frozen ms when stopped
+  frames: 0,           // emulated frames this attempt
+  best: null,          // best finished-attempt ms this session
+  onFrame() {
+    if (!romLoaded) return;
+    this.frames++;
+    if (this.hudOn) this.paintHud();
+  },
+  paintHud() {
+    const t = this.running ? performance.now() - this.startedAt : this.elapsed;
+    const timer = $('hud-timer'), best = $('hud-best'), fr = $('hud-frames');
+    if (timer) timer.textContent = fmtMS(t);
+    if (best) best.textContent = this.best != null ? `best ${fmtMS(this.best)}` : 'best —';
+    if (fr) fr.textContent = `${this.frames}f`;
+  },
+  onReset() {
+    // A reset *finishes* the previous attempt (that's the loadless split),
+    // then starts the next one.
+    if (this.running && (this.best == null || performance.now() - this.startedAt < this.best)) {
+      this.best = performance.now() - this.startedAt;
+    }
+    this.frames = 0;
+    this.startedAt = performance.now();
+    this.running = true;
+    if (this.hudOn) this.paintHud();
+  },
+  stop() { if (this.running) { this.elapsed = performance.now() - this.startedAt; this.running = false; } if (this.hudOn) this.paintHud(); },
+  display() { return this.running ? performance.now() - this.startedAt : this.elapsed; },
+  setHud(on) {
+    this.hudOn = on;
+    const hud = $('practice-hud');
+    if (hud) hud.classList.toggle('on', on);
+    $('prac-toggle').textContent = `show timer: ${on ? 'on' : 'off'}`;
+    saveSetting('practiceHud', on);
+    if (on) this.paintHud();
+  },
+};
+function fmtMS(ms) {
+  const m = Math.floor(ms / 60000), s = Math.floor(ms / 1000) % 60, cs = Math.floor(ms / 10) % 100;
+  return `${m}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+}
+function practiceHotReset() {
+  if (!romLoaded) return;
+  resetGame();
+  setStatus('practice: attempt reset (F8)');
+}
+
+// ---- input display (practice panel + HUD; polled from the frame loop) ----
+const INPUT_LABELS = [['right', '→'], ['left', '←'], ['up', '↑'], ['down', '↓'], ['a', 'A'], ['b', 'B'], ['start', 'st'], ['select', 'se']];
+function renderInputDisplay() {
+  const box = $('prac-inputs');
+  if (!box) return;
+  if (!box.children.length) {
+    for (const [key, label] of INPUT_LABELS) {
+      const s = document.createElement('span');
+      s.className = 'inkey'; s.dataset.btn = key; s.textContent = label;
+      box.appendChild(s);
+    }
+  }
+  for (const s of box.children) s.classList.toggle('on', !!input.state[s.dataset.btn]);
+  const hud = $('hud-inputs');
+  if (hud && practice.hudOn) {
+    if (!hud.children.length) {
+      for (const [key, label] of INPUT_LABELS) {
+        const s = document.createElement('span');
+        s.className = 'inkey'; s.dataset.btn = key; s.textContent = label;
+        hud.appendChild(s);
+      }
+    }
+    for (const s of hud.children) s.classList.toggle('on', !!input.state[s.dataset.btn]);
+  }
 }
 
 function setPaused(p) {
   paused = p;
   $('btn-pause').textContent = p ? 'resume' : 'pause';
+  // the ghost freezes/resumes with the game so the race stays in lockstep
+  if (ghost) { if (p) ghost.pause(); else ghost.resume(); }
   if (!p) { audio.resume(); lastFrameTime = performance.now(); }
   else setStatus('paused');
 }
@@ -478,6 +732,9 @@ async function showLibrary() {
   // leaving the playing view: drop any open overlay (menu, cheats, debug…)
   for (const o of document.querySelectorAll('.overlay.open')) o.classList.remove('open');
   debug.stop();
+  if (ghost) { ghost.stop(); renderer.ghostFrame = null; }
+  const gstat = $('ghost-status'); if (gstat) gstat.classList.remove('on');
+  const gpip2 = $('ghost-pip'); if (gpip2) gpip2.classList.remove('on');
   showScreen(false);
   elLibGrid.textContent = '';
   const recent = await window.pocketgb.getSettings().then((s) => s['recent'] || []);
@@ -503,7 +760,7 @@ async function showLibrary() {
     const actions = document.createElement('div');
     actions.className = 'card-actions';
     const trashBtn = document.createElement('button');
-    trashBtn.textContent = '🗑';
+    trashBtn.textContent = 'saves';
     trashBtn.title = 'Delete this game\'s saves and save-states';
     trashBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -518,15 +775,10 @@ async function showLibrary() {
     });
     actions.appendChild(trashBtn);
     actions.appendChild(xBtn);
-    const editBtn = document.createElement('button');
-    editBtn.textContent = '✎';
-    editBtn.title = 'Edit ROM header (title, region, color mode)';
-    editBtn.addEventListener('click', (e) => { e.stopPropagation(); openHeaderEditor(r); });
     const galBtn = document.createElement('button');
-    galBtn.textContent = '🖼';
+    galBtn.textContent = 'shots';
     galBtn.title = 'Screenshot gallery';
     galBtn.addEventListener('click', (e) => { e.stopPropagation(); openGallery(r); });
-    actions.appendChild(editBtn);
     actions.appendChild(galBtn);
     card.appendChild(actions);
     // cover art: user-chosen screenshot first, else newest save-state thumbnail
@@ -558,52 +810,15 @@ async function showLibrary() {
     elLibGrid.appendChild(card);
   }
 }
-// ---- ROM header editor (title / region / CGB flag) ----
-const CGB_NAMES = { 0: 'DMG only', 128: 'DMG+CGB', 192: 'CGB only' };
-const REGION_NAMES = { 0: 'Japan', 1: 'Overseas' };
-let hdrEntry = null;
-function openHeaderEditor(entry) {
-  hdrEntry = entry;
-  $('hdr-file').textContent = entry.path;
-  $('hdr-title').value = entry.title && !titleLooksBroken(entry.title) ? entry.title : '';
-  $('hdr-title').placeholder = basenameOf(entry.path);
-  $('hdr-err').textContent = '';
-  // Seed selects from the live cartridge when it's this ROM; defaults otherwise.
-  const isCurrent = gb.cart && gb.cart.rom && romInfo && romInfo.path === entry.path;
-  $('hdr-cgb').value = String(isCurrent ? (gb.cart.cgbFlag ?? 0) : 0);
-  $('hdr-region').value = String(isCurrent ? (gb.cart.region ?? 1) : 1);
-  $('ov-hdr').classList.add('open');
-}
-$('hdr-close').addEventListener('click', () => $('ov-hdr').classList.remove('open'));
-$('hdr-save').addEventListener('click', async () => {
-  if (!hdrEntry) return;
-  const title = $('hdr-title').value.trim();
-  const patch = {
-    title: title || undefined,
-    region: Number($('hdr-region').value),
-    cgb: Number($('hdr-cgb').value),
-  };
-  const res = await window.pocketgb.writeRomHeader(hdrEntry.path, patch);
-  if (!res || !res.ok) { $('hdr-err').textContent = (res && res.error) || 'write failed'; return; }
-  $('ov-hdr').classList.remove('open');
-  const wasCurrent = romInfo && romInfo.path === hdrEntry.path;
-  if (wasCurrent) setStatus(`header saved — backup: ${res.backup}`);
-  else { await showLibrary(); setStatus(`header saved — backup: ${res.backup}`); }
-  if (wasCurrent) {
-    // Reload the running game so the new header takes effect immediately.
-    const romBytes = gb.cart.rom;
-    const sav = gb.cart.battery ? gb.cart.serializeSav() : null;
-    gb.loadROM(romBytes, sav, forceDmg);
-    romInfo.title = title || romInfo.title;
-    elRomName.textContent = romInfo.title;
-  }
-});
 
 function showScreen(visible) {
   elLibrary.classList.toggle('hidden', visible);
   elBezel.classList.toggle('visible', visible);
   elSettings.classList.toggle('visible', visible);
   elLinks.classList.toggle('visible', visible);
+  // the play row (screen + ghost PiP panel) follows the bezel's visibility
+  const playRow = document.getElementById('play-row');
+  if (playRow) playRow.classList.toggle('visible', visible);
   if (visible) resizeCanvas();
 }
 
@@ -974,6 +1189,7 @@ $('btn-bootrom').addEventListener('click', async () => {
 });
 updateBootRomButton();
 $('clock-close').addEventListener('click', () => { clearInterval(clockTickTimer); toggleOverlay('ov-clock'); });
+$('clock-back').addEventListener('click', () => { clearInterval(clockTickTimer); toggleOverlay('ov-menu'); openMenuSub('sub-hardware'); });
 $('clock-rate').addEventListener('change', () => {
   if (romLoaded && gb.cart && gb.cart.hasRtc) gb.cart.setRtcRate(parseInt($('clock-rate').value, 10) || 1);
 });
@@ -981,6 +1197,7 @@ $('clock-day').addEventListener('click', () => setGameHour(6));
 $('clock-night').addEventListener('click', () => setGameHour(18));
 $('clock-noon').addEventListener('click', () => setGameHour(12));
 $('btn-cheats').addEventListener('click', () => toggleOverlay('ov-cheats'));
+$('btn-finder').addEventListener('click', () => toggleOverlay('ov-finder'));
 $('btn-effects').addEventListener('click', () => toggleOverlay('ov-effects'));
 $('btn-keys').addEventListener('click', () => toggleOverlay('ov-keys'));
 $('btn-debug').addEventListener('click', () => {
@@ -1059,8 +1276,7 @@ async function renderGallery() {
       const r = await window.pocketgb.setCover(galleryRomPath, galleryKey, s.file);
       if (r && r.ok) { galleryCoverFile = s.file; setStatus('cover art updated'); await renderGallery(); }
     });
-    const delBtn = document.createElement('button');
-    delBtn.textContent = '🗑';
+    const delBtn = document.createElement('button');      delBtn.textContent = 'del';
     delBtn.title = 'Delete this screenshot';
     delBtn.addEventListener('click', async () => {
       await window.pocketgb.deleteShot(galleryKey, s.file);
@@ -1102,6 +1318,145 @@ $('btn-webm').addEventListener('click', () => {
 $('cheat-add').addEventListener('click', addCheat);
 $('cheat-clear').addEventListener('click', () => { gb.cheats.clear(); persistCheats(); renderCheatList(); });
 $('cheat-close').addEventListener('click', () => toggleOverlay('ov-cheats'));
+
+// ---- cheat finder (RAM scanner → GameShark freeze) ----
+const finder = window.PocketCheat ? new window.PocketCheat.CheatFinder(() => gb.mmu) : null;
+function parseFinderValue(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  if (!s) return null;
+  if (/^0x[0-9a-f]+$/.test(s) || /^[0-9a-f]{1,2}$/.test(s)) return parseInt(s.replace(/^0x/, ''), 16);
+  if (/^\d{1,3}$/.test(s)) return parseInt(s, 10);
+  return NaN; // malformed → distinct from "empty"
+}
+function renderFinderList() {
+  const list = $('finder-list');
+  const err = $('finder-err');
+  err.textContent = '';
+  if (!finder || !finder.candidates) { list.textContent = 'no search yet'; return; }
+  list.textContent = '';
+  const entries = [...finder.candidates.entries()].slice(0, 200);
+  if (!entries.length) { list.textContent = 'no candidates — reset and try again'; return; }
+  for (const [addr] of entries) {
+    const row = document.createElement('div');
+    row.className = 'finder-row';
+    const val = finder.read(addr);
+    const a = document.createElement('span');
+    a.textContent = `$${addr.toString(16).toUpperCase().padStart(4, '0')} = ${val.toString(16).padStart(2, '0')} (${val})`;
+    const freeze = document.createElement('button');
+    freeze.className = 'sbutton'; freeze.textContent = 'freeze';
+    freeze.title = 'add a GameShark code that holds this address at its current value';
+    freeze.addEventListener('click', () => {
+      const r = finder.freeze(addr, gb.cheats);
+      if (r && !r.error) { persistCheats(); renderCheatList(); setStatus(`froze $${addr.toString(16).toUpperCase().padStart(4, '0')} — see cheats`); }
+      else err.textContent = (r && r.error) || 'freeze failed';
+    });
+    const watch = document.createElement('button');
+    watch.className = 'sbutton'; watch.textContent = 'watch';
+    watch.title = 'poll this address live in the watch list';
+    watch.addEventListener('click', () => {
+      if (!finder.watches.some((w) => w.addr === addr)) finder.watches.push({ addr });
+      renderFinderWatches();
+    });
+    row.appendChild(a); row.appendChild(watch); row.appendChild(freeze);
+    list.appendChild(row);
+  }
+  if (finder.candidates.size > 200) {
+    const more = document.createElement('div');
+    more.className = 'hint';
+    more.textContent = `…and ${finder.candidates.size - 200} more — narrow further`;
+    list.appendChild(more);
+  }
+}
+function renderFinderWatches() {
+  const list = $('finder-list');
+  let watchBox = document.getElementById('finder-watches');
+  if (!finder.watches.length) { if (watchBox) watchBox.remove(); return; }
+  if (!watchBox) {
+    watchBox = document.createElement('div');
+    watchBox.id = 'finder-watches';
+    list.parentElement.insertBefore(watchBox, list);
+  }
+  watchBox.textContent = '';
+  for (const w of finder.watches) {
+    const row = document.createElement('div');
+    row.className = 'finder-row watch';
+    const val = finder.read(w.addr);
+    const label = document.createElement('span');
+    label.textContent = `watch $${w.addr.toString(16).toUpperCase().padStart(4, '0')} = ${val} (0x${val.toString(16).padStart(2, '0')})`;
+    const un = document.createElement('button'); un.className = 'sbutton'; un.textContent = 'unwatch';
+    un.addEventListener('click', () => { finder.watches = finder.watches.filter((x) => x.addr !== w.addr); renderFinderWatches(); });
+    row.appendChild(label); row.appendChild(un);
+    watchBox.appendChild(row);
+  }
+}
+setInterval(() => { if ($('ov-finder').classList.contains('open')) renderFinderWatches(); }, 250);
+$('finder-search').addEventListener('click', () => {
+  if (!finder) return;
+  const v = parseFinderValue($('finder-input').value);
+  if (v === null) { const n = finder.search(null); setStatus(`search: all ${n} addresses (unknown init)`); renderFinderList(); return; }
+  if (Number.isNaN(v) || v < 0 || v > 255) { $('finder-err').textContent = 'enter 0-255 (decimal or 0x hex)'; return; }
+  const n = finder.search(v);
+  setStatus(`search: ${n} candidates = ${v}`);
+  renderFinderList();
+});
+$('finder-unknown').addEventListener('click', () => {
+  if (!finder) return;
+  const n = finder.search(null);
+  setStatus(`search: all ${n} addresses (unknown init)`);
+  renderFinderList();
+});
+$('finder-narrow').addEventListener('click', () => {
+  const row = $('finder-narrow-row'), hint = $('finder-narrow-hint');
+  const show = row.style.display === 'none';
+  row.style.display = show ? 'flex' : 'none';
+  hint.style.display = show ? 'block' : 'none';
+});
+$('finder-apply').addEventListener('click', () => {
+  if (!finder || !finder.candidates) { $('finder-err').textContent = 'search first'; return; }
+  const op = $('finder-op').value;
+  if (op === 'changed' || op === 'unchanged') {
+    const n = finder.narrow({ op });
+    setStatus(`narrow (${op}): ${n} candidates`);
+    renderFinderList();
+    return;
+  }
+  const v = parseFinderValue($('finder-narrow-val').value);
+  if (v === null || Number.isNaN(v) || v < 0 || v > 255) { $('finder-err').textContent = 'enter 0-255 for this filter'; return; }
+  const n = finder.narrow({ op, value: v });
+  setStatus(`narrow: ${n} candidates`);
+  renderFinderList();
+});
+$('finder-reset').addEventListener('click', () => {
+  if (!finder) return;
+  finder.reset(); finder.watches = [];
+  $('finder-list').textContent = 'no search yet';
+  renderFinderWatches();
+  setStatus('finder reset');
+});
+$('finder-close').addEventListener('click', () => toggleOverlay('ov-finder'));
+
+// ---- practice panel controls ----
+$('btn-practice').addEventListener('click', () => {
+  $('prac-timer').textContent = fmtMS(practice.display());
+  $('prac-frames').textContent = `frame ${practice.frames}`;
+  toggleOverlay('ov-practice');
+});
+$('prac-toggle').addEventListener('click', () => practice.setHud(!practice.hudOn));
+$('prac-start').addEventListener('click', () => {
+  if (!romLoaded) { setStatus('load a game first'); return; }
+  if (practice.running) return;
+  practice.startedAt = performance.now();
+  practice.running = true;
+  practice.paintHud();
+  setStatus('practice timer started');
+});
+$('prac-stop').addEventListener('click', () => {
+  practice.stop();
+  $('prac-timer').textContent = fmtMS(practice.elapsed);
+  setStatus(`practice stopped at ${fmtMS(practice.elapsed)}${practice.best != null ? ` — best split ${fmtMS(practice.best)}` : ''}`);
+});
+$('prac-reset').addEventListener('click', () => practiceHotReset());
+$('prac-close').addEventListener('click', () => toggleOverlay('ov-practice'));
 $('fx-close').addEventListener('click', () => toggleOverlay('ov-effects'));
 $('keys-close').addEventListener('click', () => toggleOverlay('ov-keys'));
 $('bind-reset').addEventListener('click', () => { input.setBindings(DEFAULT_BINDINGS); renderBinds(); });
@@ -1114,6 +1469,7 @@ $('fx-curve').addEventListener('change', saveEffects);
 elPalette.addEventListener('change', () => { applyPalette(); saveSetting('palette', elPalette.value); });
 elScale.addEventListener('change', () => { resizeCanvas(); saveSetting('scale', Number(elScale.value)); });
 elSpeed.addEventListener('change', () => { speed = Number(elSpeed.value) || 1; window.pocketgb.setSetting(`global:speed`, speed); });
+loadSetting('practiceHud', false).then((on) => { if (on) practice.setHud(true); }).catch(() => {});
 
 window.addEventListener('keydown', () => audio.resume(), { once: false });
 window.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); document.body.classList.add('dragging'); });
@@ -1198,3 +1554,20 @@ window.probeHook = {
 
 // Start loop
 requestAnimationFrame(loop);
+
+// Debug/probe hook: devtools and test probes can reach the machine + renderer
+// (classic-script consts aren't on window). Harmless in normal use.
+window.__pgb = { get gb() { return gb; }, get renderer() { return renderer; }, get romLoaded() { return romLoaded; }, audio, fpsGetter: () => fps, loadRom };
+window.__pgbProbeLoad = async (p) => {
+  const r = await fetch('file://' + p);
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  await loadRom({ path: p, bytes, title: p.split('/').pop() });
+  return bytes.length;
+};
+window.__pgbProbeLoadB64 = async (p, b64) => {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  await loadRom({ path: p, bytes, title: p.split('/').pop() });
+  return bytes.length;
+};
