@@ -1,6 +1,6 @@
 // PocketGB — Electron main process
 'use strict';
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
@@ -13,6 +13,13 @@ let currentRom = null; // { name, path, dir }
 let saveTimer = null;
 
 const userDir = () => app.getPath('userData');
+
+// app:// must be registered BEFORE the ready event: a standard, secure scheme
+// so the page gets a real origin and the COOP/COEP headers below can enable
+// crossOriginIsolated (→ SharedArrayBuffer → zero-copy audio ring).
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+]);
 const savesDir = () => { const d = path.join(userDir(), 'saves'); fs.mkdirSync(d, { recursive: true }); return d; };
 const statesDir = () => { const d = path.join(userDir(), 'states'); fs.mkdirSync(d, { recursive: true }); return d; };
 const shotsDir = () => { const d = path.join(userDir(), 'shots'); fs.mkdirSync(d, { recursive: true }); return d; };
@@ -98,7 +105,7 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  win.loadFile('index.html');
+  win.loadURL('app://bundle/index.html');
   win.setMenuBarVisibility(true);
 }
 
@@ -128,6 +135,7 @@ function openRomDialog() {
 
 function loadRomFromPath(romPath, patchPath) {
   try {
+    if (/\.hdrbak$/i.test(romPath)) throw new Error('That is a header backup written by PocketGB, not a game. Open the .gb/.gbc file instead.');
     const data = fs.readFileSync(romPath);
     if (data.length < 0x150) throw new Error('File too small to be a Game Boy ROM');
     const name = path.basename(romPath);
@@ -223,10 +231,46 @@ function buildMenu() {
 }
 
 app.whenReady().then(() => {
+  // ---- app:// protocol with cross-origin isolation headers ----
+  // Serving over plain file:// leaves the page without crossOriginIsolated,
+  // so SharedArrayBuffer (the zero-copy lock-free audio ring) is unavailable
+  // and audio falls back to per-block postMessage copies — audibly laggy.
+  // COOP/COEP response headers flip crossOriginIsolated on.
+  const COOP_COEP = {
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    'Cross-Origin-Embedder-Policy': 'require-corp',
+  };
+  protocol.handle('app', (request) => {
+    try {
+      // app://bundle/index.html → <project>/index.html
+      const u = new URL(request.url);
+      let p = decodeURIComponent(u.pathname).replace(/^\/+/, '');
+      if (p === '' || p.endsWith('/')) p += 'index.html';
+      const root = __dirname; // main.js lives in the bundle root
+      const full = path.normalize(path.join(root, p));
+      if (!full.startsWith(path.normalize(root))) {
+        return new Response('forbidden', { status: 403 }); // stay inside the bundle
+      }
+      const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.json': 'application/json',
+        '.wasm': 'application/wasm', '.map': 'application/json', '.woff2': 'font/woff2' };
+      const data = fs.readFileSync(full);
+      return new Response(data, {
+        headers: { 'content-type': types[path.extname(full).toLowerCase()] || 'application/octet-stream', ...COOP_COEP },
+      });
+    } catch {
+      return new Response('not found', { status: 404 });
+    }
+  });
+
   ipcMain.on('menu-refresh', () => buildMenu()); // refreshes Recent ROMs + slot state
   ipcMain.on('open-rom-dialog', () => openRomDialog());
   ipcMain.on('set-setting', (e, key, value) => {
-    if (typeof key !== 'string' || key.length > 128) return;
+    // Key shape: game:<base64url-of-rom-path>:<field> — long ROM paths base64 out
+    // well past 128 chars (SMB Deluxe's key is 156), so the bound must stay
+    // generous; 512 still rejects runaway/abusive keys while accepting every
+    // realistic path. Value must survive a JSON round-trip.
+    if (typeof key !== 'string' || key.length > 512) return;
     writeSetting(key, value);
   });
   ipcMain.handle('get-settings', () => readSettings());
@@ -322,7 +366,7 @@ app.whenReady().then(() => {
     // If the deleted game is currently running, close it back to the library.
     if (currentRom && currentRom.path === romPath && win && !win.isDestroyed()) {
       currentRom = null;
-      win.loadFile('index.html');
+      win.loadURL('app://bundle/index.html');
     }
     return { ok: true, removed, removedFromList: removed };
   });
@@ -438,42 +482,6 @@ app.whenReady().then(() => {
       return { ok: true, text, path: p };
     }
     catch (err) { return { ok: false, error: String(err.message || err) };
-    }
-  });
-
-  ipcMain.handle('write-rom-header', (e, romPath, patch) => {
-    try {
-      if (typeof romPath !== 'string' || !path.isAbsolute(romPath)) return { ok: false, error: 'bad path' };
-      if (!patch || typeof patch !== 'object') return { ok: false, error: 'bad patch' };
-      // Accept only the three editable header fields; offsets are fixed by the cartridge header spec.
-      const buf = fs.readFileSync(romPath);
-      if (buf.length < 0x150 || buf[0x104] !== 0xCE || buf[0x105] !== 0xED) return { ok: false, error: 'not a Game Boy ROM (logo missing)' };
-      const backup = romPath.replace(/\.(gb|gbc|gbx|2)$/i, '') + '.hdrbak';
-      if (!fs.existsSync(backup)) fs.writeFileSync(backup, buf); // one backup only — always the pristine dump
-      if (typeof patch.title === 'string') {
-        const enc = Buffer.from(patch.title, 'latin1');
-        if (enc.length > 15) return { ok: false, error: 'title too long' };
-        buf.fill(0, 0x134, 0x144); // pad to the 15-byte field, NUL-terminated
-        enc.copy(buf, 0x134);
-      }
-      if (Number.isInteger(patch.region) && patch.region >= 0 && patch.region <= 1) buf[0x14A] = patch.region;
-      if (Number.isInteger(patch.cgb) && [0x00, 0x80, 0xC0].includes(patch.cgb)) buf[0x143] = patch.cgb;
-      fs.writeFileSync(romPath, buf);
-      // Keep the library consistent: new title → recent list + window title.
-      if (typeof patch.title === 'string') {
-        const rec = readRecent();
-        const entry = rec.find((r) => r.path === romPath);
-        if (entry) {
-          entry.title = patch.title;
-          fs.writeFileSync(path.join(userDir(), 'recent.json'), JSON.stringify(rec));
-          writeSetting('recent', rec.slice(0, 12));
-        }
-        if (currentRom && currentRom.path === romPath && win && !win.isDestroyed()) {
-          win.setTitle(`PocketGB — ${patch.title}`);
-        }
-      }
-      return { ok: true, backup };
-    } catch (err) { return { ok: false, error: String(err.message || err) };
     }
   });
 
