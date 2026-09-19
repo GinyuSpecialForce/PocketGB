@@ -107,6 +107,18 @@ class Renderer {
     // ---- WebGL shader path ----
     this.gl = null;
     this.frameCount = 0;
+    // ---- Super Game Boy ----
+    this.sgb = null;             // active SGB layer (set by app.js per game)
+    this.sgbBorder = null;       // 256x224 RGBA canvas-ish Uint32Array when present
+    // ---- ghost racer picture-in-picture ----
+    // Ghost draws at full palette color into its own 160x144 surface, which
+    // the app displays in the #ghost-pip panel BESIDE the game screen. If the
+    // app hasn't attached the panel yet, fall back to an offscreen canvas.
+    this.ghostCanvas = document.getElementById('ghost-screen') || document.createElement('canvas');
+    if (this.ghostCanvas.width !== 160) { this.ghostCanvas.width = 160; this.ghostCanvas.height = 144; }
+    this.gctx = this.ghostCanvas.getContext('2d');
+    this.ghostImage = this.gctx.createImageData(160, 144);
+    this.ghostPx = new Uint32Array(this.ghostImage.data.buffer);
   }
 
   setPalette(colors) {
@@ -115,6 +127,72 @@ class Renderer {
       const [r, g, b] = colors[i];
       this.palRGB[i] = (0xFF << 24) | (b << 16) | (g << 8) | r;
     }
+  }
+
+  // Attach an SGB layer and rebuild the border bitmap when the game sends one.
+  setSGB(sgb) {
+    this.sgb = sgb;
+    if (!sgb) this.sgbBorder = null;
+  }
+
+  // Rebuild the 256x224 border RGBA buffer from the game's CHR/map/palette
+  // transfers (SNES 4bpp planar tiles, 32x28 map, 4 palettes of 16).
+  _rebuildSgbBorder(sgb) {
+    const W = 256, H = 224;
+    const out = new Uint32Array(W * H);
+    out.fill(0xFF000000); // backdrop black behind everything
+    const tiles = sgb.borderTiles, map = sgb.borderMap, pals = sgb.borderPal;
+    for (let my = 0; my < 28; my++) {
+      for (let mx = 0; mx < 32; mx++) {
+        const e = map[my * 32 + mx];
+        const tile = e & 0xFF, palIdx = ((e >> 10) & 7) - 4; // palettes 4-7 → 0-3
+        const xflip = !!(e & 0x4000), yflip = !!(e & 0x8000);
+        if (palIdx < 0 || palIdx > 3 || !tiles) continue;
+        for (let py = 0; py < 8; py++) {
+          const ty = yflip ? 7 - py : py;
+          // SNES 4bpp: 8 bytes per tile-row — low plane byte, then high plane byte
+          const lo = tiles[tile * 32 + ty * 2], hi = tiles[tile * 32 + ty * 2 + 1];
+          const lo2 = tiles[tile * 32 + ty * 2 + 16], hi2 = tiles[tile * 32 + ty * 2 + 17];
+          for (let px = 0; px < 8; px++) {
+            const bit = xflip ? px : 7 - px;
+            const b0 = (lo >> bit) & 1, b1 = (hi >> bit) & 1, b2 = (lo2 >> bit) & 1, b3 = (hi2 >> bit) & 1;
+            const ci = b0 | (b1 << 1) | (b2 << 2) | (b3 << 3);
+            const c = pals[palIdx * 16 + ci];
+            if (ci === 0) continue; // color 0 transparent → backdrop
+            const dx = mx * 8 + px, dy = my * 8 + py;
+            if (dx >= W || dy >= H) continue;
+            const r = (c & 31) << 3, g = ((c >> 5) & 31) << 3, b = ((c >> 10) & 31) << 3;
+            out[dy * W + dx] = (0xFF << 24) | (b << 16) | (g << 8) | r;
+          }
+        }
+      }
+    }
+    this.sgbBorder = out;
+  }
+
+  // Paint the border into the visible canvas around the 160x144 game area.
+  _presentSgbBorder() {
+    const sgb = this.sgb;
+    if (!sgb) return;
+    if (sgb.borderDirty && sgb.borderMap && sgb.borderPal) { this._rebuildSgbBorder(sgb); sgb.borderDirty = false; }
+    if (!this.sgbBorder) return;
+    // layout: border canvas scaled to fit the visible canvas, GB area centered
+    const W = 256, H = 224;
+    const scale = Math.min(this.canvas.width / W, this.canvas.height / H);
+    const dw = Math.floor(W * scale), dh = Math.floor(H * scale);
+    const ox = Math.floor((this.canvas.width - dw) / 2), oy = Math.floor((this.canvas.height - dh) / 2);
+    const bctx = this._borderCtx || (this._borderCtx = document.createElement('canvas').getContext('2d'));
+    const bc = bctx.canvas; bc.width = W; bc.height = H;
+    const img = bctx.createImageData(W, H);
+    new Uint32Array(img.data.buffer).set(this.sgbBorder);
+    bctx.putImageData(img, 0, 0);
+    const ctx = this.ctx;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(bc, ox, oy, dw, dh);
+    // the game window position inside the border
+    const gx = ox + Math.floor(48 * scale), gy = oy + Math.floor(40 * scale);
+    const gw = Math.floor(160 * scale), gh = Math.floor(144 * scale);
+    ctx.drawImage(this.offscreen, gx, gy, gw, gh);
   }
 
   setEffects(e) {
@@ -231,20 +309,44 @@ class Renderer {
   blit(fb, isColor) {
     if (!fb) return;
     if (!this.px) this.px = new Uint32Array(this.imageData.data.buffer);
+    if (!this._rgb555LUT) {
+      // 32K-entry BGR555→xRGB888 LUT: the CGB blit is otherwise 23,040
+      // function calls per frame (the single largest per-frame CPU cost for
+      // color games). One-time ~256 KB allocation, then one array read/pixel.
+      this._rgb555LUT = new Uint32Array(32768);
+      for (let c = 0; c < 32768; c++) this._rgb555LUT[c] = rgb555to888(c);
+    }
+    const rgb555LUT = this._rgb555LUT;
+    // SGB path: remap DMG shades through the game's SGB palettes, honor the
+    // screen mask, then skip the normal DMG palette entirely.
+    const sgb = this.sgb;
+    if (sgb && !isColor) {
+      if (sgb.mask === 2) { this.px.fill(0xFF000000); }
+      else if (sgb.mask === 3) { this.px.fill(0xFF000000 | (rgb555to888(sgb.palData[0]))); }
+      else {
+        const src = sgb.mask === 1 && sgb.frozen ? sgb.frozen : fb;
+        if (sgb.mask === 1 && !sgb.frozen) sgb.freeze(fb);
+        for (let i = 0; i < this.px.length; i++) {
+          const tile = (i / 160) | 0, col = i % 160;
+          const pal = sgb.attrMap[((tile >> 3) * 20 + (col >> 3)) % sgb.attrMap.length];
+          this.px[i] = rgb555to888(sgb.mapShade(src[i] & 3, pal));
+        }
+      }
+    } else {
     const px = this.px;
     const ghost = this.effects.ghosting && this.prevPx;
     if (isColor) {
       if (ghost) {
         const g = this.ghostStrength, ig = 1 - g, prev = this.prevPx;
         for (let i = 0; i < px.length; i++) {
-          const cur = rgb555to888(fb[i]), old = prev[i];
+          const cur = rgb555LUT[fb[i] & 0x7FFF], old = prev[i];
           const r = (((cur & 0xFF) * ig + (old & 0xFF) * g) | 0);
           const gc = ((((cur >>> 8) & 0xFF) * ig + ((old >>> 8) & 0xFF) * g) | 0);
           const b = ((((cur >>> 16) & 0xFF) * ig + ((old >>> 16) & 0xFF) * g) | 0);
           px[i] = 0xFF000000 | (b << 16) | (gc << 8) | r;
         }
       } else {
-        for (let i = 0; i < px.length; i++) px[i] = rgb555to888(fb[i]);
+        for (let i = 0; i < px.length; i++) px[i] = rgb555LUT[fb[i] & 0x7FFF];
       }
     } else if (ghost) {
       // Mix each channel with the previous frame (LCD response-time ghosting).
@@ -267,12 +369,40 @@ class Renderer {
     }
     this.octx.putImageData(this.imageData, 0, 0);
     this.frameCount++;
+    } // end non-SGB blit path
+    // Ghost racer picture-in-picture: drawn to its OWN canvas panel beside
+    // the game (see index.html #ghost-pip) — never over the game display.
+    // capture.observe() receives the raw game framebuffer, so GIF/WebM/movies
+    // stay ghost-free.
+    if (this.ghostFrame) this.blitGhost(this.ghostFrame, isColor);
+    this.ghostFrame = null; // one-shot: only the frame that set it composites
+  }
+
+  // Ghost PiP: render the ghost machine's framebuffer into the separate
+  // #ghost-screen canvas at REGULAR palette color. The panel visibility is
+  // managed by the app (`.on` class); this just blits pixels.
+  blitGhost(gf, isColor) {
+    const gp = this.ghostPx;
+    if (isColor) {
+      const lut = this._rgb555LUT;
+      if (lut) {
+        for (let i = 0; i < gp.length; i++) gp[i] = lut[gf[i] & 0x7FFF];
+      } else {
+        for (let i = 0; i < gp.length; i++) gp[i] = rgb555to888(gf[i]);
+      }
+    } else {
+      for (let i = 0; i < gp.length; i++) gp[i] = this.palRGB[gf[i] & 3];
+    }
+    this.gctx.putImageData(this.ghostImage, 0, 0);
   }
 
   present() {
     const useShader = this.effects.shader && this._ensureGL();
     if (useShader) this._presentGL();
     else this._present2D();
+    // SGB border (if the game transferred one) wraps the game area; drawn over
+    // the background after the game window so it can overlap like on hardware.
+    if (this.sgb && this.sgbBorder !== null) this._presentSgbBorder();
   }
 
   _present2D() {

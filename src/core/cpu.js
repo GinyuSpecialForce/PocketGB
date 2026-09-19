@@ -172,8 +172,14 @@ class CPU {
   // Execute one instruction (plus servicing one interrupt). Returns m-cycles.
   step() {
     if (this.imeDelay) { this.ime = true; this.imeDelay = false; }
-    const served = this.checkInterrupts();
-    if (served) return served;
+    // Hot path: the interrupt check runs before EVERY instruction (~21k times
+    // per frame), so the all-quiet case is inlined here instead of paying a
+    // call frame into checkInterrupts() each time. Identical semantics.
+    const mmu = this.mmu;
+    if (mmu.ie & mmu.if & 0x1F) {
+      const served = this.checkInterrupts();
+      if (served) return served;
+    }
     if (this.halted) return 4; // just wait
     if (this.haltBug) {
       // HALT bug: PC is left unchanged for the next fetch (byte is read twice)

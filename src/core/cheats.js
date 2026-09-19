@@ -127,4 +127,89 @@ class CheatEngine {
   }
 }
 
-if (typeof module !== 'undefined') module.exports = { CheatEngine, parseGameShark, parseGameGenie };
+// ---- Cheat finder (RAM scanner) ------------------------------------------
+// Search working RAM (C000-DFFF via mmu.read, so CGB banking applies) plus
+// high RAM for an 8-bit value, narrow the candidate set by comparing snapshots,
+// watch candidates live, and promote any hit to a real GameShark code that
+// freezes the address. 8-bit covers essentially all GB game state (lives,
+// coins above 255 live as BCD pairs, timers, positions); 16-bit searchers can
+// scan twice: byte found, then narrow by "address ±1 unchanged".
+
+class CheatFinder {
+  constructor(mmuProvider) {
+    this.getMmu = mmuProvider;   // () => mmu — game swaps must stay visible
+    this.candidates = null;      // Map addr → last-seen value, or null
+    this.prevSnapshot = null;    // Map addr → value at previous scan
+    this.watches = [];           // [{ addr }] polled live by the UI
+  }
+
+  _scanAddresses() {
+    const mmu = this.getMmu();
+    const addrs = [];
+    for (let a = 0xC000; a < 0xE000; a++) addrs.push(a);       // WRAM (8/32K, banking via readWRAM)
+    for (let a = 0xFF80; a < 0xFFFE; a++) addrs.push(a);       // HRAM
+    return { mmu, addrs };
+  }
+
+  // First search: value === null means "unknown initial value" (take all).
+  // Returns the number of candidates.
+  search(value) {
+    const { mmu, addrs } = this._scanAddresses();
+    this.candidates = new Map();
+    for (const a of addrs) {
+      const v = mmu.read(a) & 0xFF;
+      if (value === null || v === (value & 0xFF)) this.candidates.set(a, v);
+    }
+    return this.candidates.size;
+  }
+
+  // Narrow: keep only candidates matching the filter.
+  //   { op: 'eq'|'ne'|'lt'|'gt', value }  — compare against a typed value
+  //   { op: 'changed'|'unchanged' }       — compare against the previous scan
+  //   { op: 'plus'|'minus', value }       — delta since previous scan
+  narrow(filter) {
+    if (!this.candidates) return 0;
+    const mmu = this.getMmu();
+    const next = new Map();
+    this.prevSnapshot = this.candidates;
+    for (const [a, oldV] of this.candidates) {
+      const v = mmu.read(a) & 0xFF;
+      // oldV is the value at the previous scan — narrows are snapshots, and the
+      // game plays in between, so deltas measure real movement since last scan.
+      const keep =
+        filter.op === 'changed' ? v !== oldV :
+        filter.op === 'unchanged' ? v === oldV :
+        filter.op === 'plus' ? (v - oldV + 256) % 256 === (filter.value & 0xFF) :
+        filter.op === 'minus' ? (oldV - v + 256) % 256 === (filter.value & 0xFF) :
+        filter.op === 'eq' ? v === (filter.value & 0xFF) :
+        filter.op === 'ne' ? v !== (filter.value & 0xFF) :
+        filter.op === 'lt' ? v < (filter.value & 0xFF) :
+        filter.op === 'gt' ? v > (filter.value & 0xFF) : false;
+      if (keep) next.set(a, v);
+    }
+    this.candidates = next;
+    return next.size;
+  }
+
+  // Watch list: stable polling source for the UI (also survives rescans).
+  read(addr) { const mmu = this.getMmu(); return mmu ? mmu.read(addr & 0xFFFF) & 0xFF : 0; }
+
+  // Promote a candidate to a persistent GameShark code (freezes the address).
+  freeze(addr, engine, value) {
+    const mmu = this.getMmu();
+    const v = (value !== undefined ? value : mmu.read(addr)) & 0xFF;
+    return engine.add(gsFreezeCode(addr, v));
+  }
+
+  reset() { this.candidates = null; this.prevSnapshot = null; }
+}
+
+// Build the GameShark code string that freezes `addr` at `value`
+// (01 VV LL HH — bank tag ignored by our decoder; kept conventional).
+function gsFreezeCode(addr, value) {
+  return ('01' + value.toString(16).padStart(2, '0') +
+    (addr & 0xFF).toString(16).padStart(2, '0') + ((addr >> 8) & 0xFF).toString(16).padStart(2, '0')).toUpperCase();
+}
+
+if (typeof module !== 'undefined') module.exports = { CheatEngine, parseGameShark, parseGameGenie, CheatFinder, gsFreezeCode };
+if (typeof window !== 'undefined') window.PocketCheat = { CheatEngine, parseGameShark, parseGameGenie, CheatFinder, gsFreezeCode };

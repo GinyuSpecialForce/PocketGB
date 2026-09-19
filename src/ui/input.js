@@ -20,9 +20,9 @@ const DEFAULT_BINDINGS = {
 if (typeof window !== 'undefined') window.DEFAULT_BINDINGS = DEFAULT_BINDINGS; // plain-script global
 
 // Hotkeys are fixed (not remapped): Tab turbo, Backspace rewind, F2 cheats,
-// F6 effects, F10 keys. Listed here only so InputManager can ignore them when
-// they collide with bindings.
-const RESERVED = new Set(['Tab', 'Backspace', 'F2', 'F6', 'F10']);
+// F6 effects, F8 practice-reset, F10 keys. Listed here only so InputManager
+// can ignore them when they collide with bindings.
+const RESERVED = new Set(['Tab', 'Backspace', 'F2', 'F6', 'F8', 'F10']);
 
 class InputManager {
   constructor() {
@@ -85,10 +85,14 @@ class InputManager {
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (RESERVED.has(e.code)) {
-      // Reserve always-on actions; let the browser own the rest (Tab focus etc.)
+      // Fixed hotkeys live here so remapped game keys can never shadow them.
       if (e.code === 'Tab' || e.code === 'Backspace') {
         e.preventDefault();
         for (const l of this.hotkeyListeners) l(down ? (e.code === 'Tab' ? 'turbo-on' : 'rewind-on') : (e.code === 'Tab' ? 'turbo-off' : 'rewind-off'));
+      } else if (down && (e.code === 'F2' || e.code === 'F6' || e.code === 'F8' || e.code === 'F10')) {
+        e.preventDefault();
+        const action = e.code === 'F2' ? 'cheats' : e.code === 'F6' ? 'effects' : e.code === 'F8' ? 'practice-reset' : 'keys';
+        for (const l of this.hotkeyListeners) l(action);
       }
       return;
     }
@@ -99,12 +103,6 @@ class InputManager {
         this.state[btn] = down;
         this.emit();
       }
-      return;
-    }
-    if (down && (e.code === 'F2' || e.code === 'F6' || e.code === 'F10')) {
-      e.preventDefault();
-      const action = e.code === 'F2' ? 'cheats' : e.code === 'F6' ? 'effects' : 'keys';
-      for (const l of this.hotkeyListeners) l(action);
     }
   }
 

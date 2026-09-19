@@ -17,6 +17,11 @@ class Capture {
     this.frames = [];           // DMG: recent frames as Uint8Array(160*144) shade indices
     this.framesCgb = [];        // CGB: recent frames as Uint16Array(160*144) BGR555
     this.maxFrames = 300;       // ~5s at 60fps of rolling history
+    // Buffer pool: history frames cycle through the same ~300 buffers forever
+    // instead of allocating 23KB/frame (~1.4 MB/s of GC churn → periodic
+    // multi-frame stalls). Recording still takes fresh private copies.
+    this._poolDmg = [];
+    this._poolCgb = [];
     this.recording = false;
     this.recordMode = null;     // 'dmg' | 'cgb' while recording
     this.recorded = [];         // frames captured while recording (DMG)
@@ -29,6 +34,17 @@ class Capture {
   setOnStatus(cb) { this.onStatus = cb; }
   status(msg) { if (this.onStatus) this.onStatus(msg); }
 
+  // Drop rolling history + any in-flight recording state (game switches).
+  // Keeps startGif's 'cgb if CGB frames exist' heuristic honest.
+  resetHistory() {
+    this.frames.length = 0;
+    this.framesCgb.length = 0;
+    this.recorded.length = 0;
+    this.recordedCgb.length = 0;
+    this.recordMode = null;
+    // pooled buffers survive — they get refilled by observe() as needed
+  }
+
   // Rolling history for "record last N seconds" — call once per presented frame.
   // fb is a shade-index Uint8Array (DMG) or BGR555 Uint32Array (CGB).
   observe(fb, isColor) {
@@ -37,12 +53,15 @@ class Capture {
     this._lastCapture = now;
 
     if (isColor) {
-      const copy = new Uint16Array(fb.length);
-      for (let i = 0; i < fb.length; i++) copy[i] = fb[i] & 0x7FFF; // 555 (bit 15 unused)
+      // steady state: reuse a pooled buffer; when full, the evicted oldest
+      // buffer returns to the pool — zero steady-state allocation
+      let copy = this._poolCgb.pop();
+      if (!copy || copy.length !== fb.length) copy = new Uint16Array(fb.length);
+      for (let i = 0; i < copy.length; i++) copy[i] = fb[i] & 0x7FFF; // 555 (bit 15 unused)
       this.framesCgb.push(copy);
-      if (this.framesCgb.length > this.maxFrames) this.framesCgb.shift();
+      if (this.framesCgb.length > this.maxFrames) this._poolCgb.push(this.framesCgb.shift());
       if (this.recording && this.recordMode === 'cgb') {
-        this.recordedCgb.push(copy);
+        this.recordedCgb.push(new Uint16Array(copy)); // private copy: recording outlives history
         if (this.recordedCgb.length % 30 === 0) {
           this.status(`recording… ${Math.round(this.recordedCgb.length / 60 * 10) / 10}s`);
         }
@@ -50,12 +69,13 @@ class Capture {
       return;
     }
 
-    const copy = new Uint8Array(160 * 144);
+    let copy = this._poolDmg.pop();
+    if (!copy) copy = new Uint8Array(160 * 144);
     copy.set(fb);
     this.frames.push(copy);
-    if (this.frames.length > this.maxFrames) this.frames.shift();
+    if (this.frames.length > this.maxFrames) this._poolDmg.push(this.frames.shift());
     if (this.recording && this.recordMode === 'dmg') {
-      this.recorded.push(copy);
+      this.recorded.push(new Uint8Array(copy)); // private copy
       if (this.recorded.length % 30 === 0) {
         this.status(`recording… ${Math.round(this.recorded.length / 60 * 10) / 10}s`);
       }
@@ -71,10 +91,11 @@ class Capture {
     this.recording = true;
     this.recordMode = this.framesCgb.length ? 'cgb' : 'dmg';
     if (this.recordMode === 'cgb') {
-      this.recordedCgb = this.framesCgb.slice(-60); // include the last second
+      // deep-copy the seed: history buffers are pooled and will be reused
+      this.recordedCgb = this.framesCgb.slice(-60).map((b) => new Uint16Array(b));
       this.recorded = [];
     } else {
-      this.recorded = this.frames.slice(-60);
+      this.recorded = this.frames.slice(-60).map((b) => new Uint8Array(b));
       this.recordedCgb = [];
     }
     this.status('recording…');

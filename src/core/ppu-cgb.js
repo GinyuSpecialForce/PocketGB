@@ -23,6 +23,7 @@ const _OBJ_MARK = 0x20; // row[x] has an OBJ pixel (same encoding as the DMG PPU
 class CgbPPU extends _BasePPU {
   constructor(interrupt) {
     super(interrupt);
+    this._oamIds = [];             // scratch reused by _cleanOAM (no per-line alloc)
     this.vram = new Uint8Array(0x4000);         // two 8 KB banks
     this.colorFramebuffer = new Uint32Array(_SCREEN_W * _SCREEN_H); // BGR555
     this.bgpd = new Uint8Array(64);             // 8 BG palettes × 4 colors × 2 bytes
@@ -228,7 +229,9 @@ class CgbPPU extends _BasePPU {
   _cleanOAM(y) {
     const oam = this.oam;
     const h = (this.lcdc & 0x04) ? 16 : 8;
-    const ids = [];
+    // Reused across lines: a fresh [] here allocates 144 arrays per frame.
+    const ids = this._oamIds;
+    ids.length = 0;
     for (let i = 0; i < 40 && ids.length < 10; i++) {
       const oy = oam[i * 4];
       if (y < oy - 16 || y >= oy - 16 + h) continue;

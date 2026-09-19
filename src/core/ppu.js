@@ -22,6 +22,7 @@ class PPU {
     this.row = new Uint16Array(SCREEN_W);    // mgba-style working row (BG color or OBJ-marked)
     this.bgRow = new Uint8Array(SCREEN_W);   // plain BG/window color per pixel (for final mix)
     this.sortedSprites = [];
+    this._oamIds = [];             // scratch reused by _cleanOAM (no per-line alloc)
     this.frameReady = false;
     this.reset();
   }
@@ -296,7 +297,9 @@ class PPU {
   _cleanOAM(y) {
     const oam = this.oam;
     const h = (this.lcdc & 0x04) ? 16 : 8;
-    const ids = [];
+    // Reused across lines: a fresh [] here allocates 144 arrays per frame.
+    const ids = this._oamIds;
+    ids.length = 0;
     for (let i = 0; i < 40 && ids.length < 10; i++) {
       const oy = oam[i * 4];
       if (y < oy - 16 || y >= oy - 16 + h) continue;

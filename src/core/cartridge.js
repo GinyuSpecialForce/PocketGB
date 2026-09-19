@@ -222,21 +222,25 @@ class Cartridge {
     }
   }
 
-  readRom(addr) {
-    // addr in 0x0000-0x7FFF
-    let bank;
+  // Physical ROM bank mapped at addr (0x0000-0x7FFF) right now. Kept separate
+  // from readRom so tools (heatmap) can translate PCs without side effects.
+  bankFor(addr) {
     const mbc1mode1 = this.mbc === 1 && (this.mode === 1 || this.mbc1m);
     if (addr < 0x4000) {
-      bank = 0;
-      if (mbc1mode1) bank = (this.bank2 << 5) % this.numRomBanks;
-    } else {
-      let b = this.romBank;
-      if (mbc1mode1) b = ((this.bank2 << 5) | (b & 0x1F)) % this.numRomBanks;
-      else bank = b % this.numRomBanks;
-      if (mbc1mode1) bank = b;
-      // MBC1/2/3 skip bank 0 in the switchable area (maps to 1); MBC5 may map 0 legally
-      if (bank === 0 && this.mbc !== 5 && this.mbc !== 0 && this.mbc !== 'HUC1') bank = 1 % this.numRomBanks;
+      if (mbc1mode1) return (this.bank2 << 5) % this.numRomBanks;
+      return 0;
     }
+    let b = this.romBank;
+    let bank = b % this.numRomBanks;
+    if (mbc1mode1) { b = ((this.bank2 << 5) | (b & 0x1F)) % this.numRomBanks; bank = b; }
+    // MBC1/2/3 skip bank 0 in the switchable area (maps to 1); MBC5 may map 0 legally
+    if (bank === 0 && this.mbc !== 5 && this.mbc !== 0 && this.mbc !== 'HUC1') bank = 1 % this.numRomBanks;
+    return bank;
+  }
+
+  readRom(addr) {
+    // addr in 0x0000-0x7FFF
+    const bank = this.bankFor(addr);
     const arr = this.romBanks[bank] || this.romBanks[0];
     const romByte = arr[addr & 0x3FFF];
     if (this.cheats) {

@@ -97,7 +97,12 @@ class DebugView {
   start() {
     this.stop();
     this.render(); // immediate
-    this.timer = setInterval(() => this.render(), 250);
+    this.timer = setInterval(() => {
+      this.render();
+      if (typeof renderHeatmap === 'function' && document.getElementById('ov-debug').classList.contains('open')) {
+        try { renderHeatmap(); } catch { /* heatmap is diagnostics, never fatal */ }
+      }
+    }, 250);
   }
 
   stop() {

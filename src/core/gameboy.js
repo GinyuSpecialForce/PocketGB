@@ -47,6 +47,17 @@ class GameBoy {
     this.mmu.wram = new Uint8Array(cgbWram);
     this.mmu.serial = this.serial;
     this.mmu.cgb = cgb;
+    // Super Game Boy layer: only for DMG games with the SGB unlock in the
+    // header (0x146=03 + old licensee 0x33) — the ICD2 gate for SGB features.
+    const _SGB = (typeof SGB !== 'undefined') ? SGB : require('./sgb').SGB;
+    const sgbUnlocked = !cgb && this.cart.rom[0x146] === 0x03 && this.cart.rom[0x14B] === 0x33;
+    if (sgbUnlocked) {
+      this.sgb = new _SGB();
+      this.joypad.sgb = this.sgb;
+    } else {
+      this.sgb = null;
+      this.joypad.sgb = null;
+    }
     // Optional authentic boot ROM (user-supplied dump): DMG (256 B) maps at
     // 0000-00FF; CGB (2 KB, incl. the color intro) maps at 0000-08FF. Without
     // one the CPU starts at the post-boot state (built-in fast boot).
@@ -62,23 +73,41 @@ class GameBoy {
     this.cpu.mmu = this.mmu;
     this.ppu.mmu = this.mmu; // HDMA source reads
     this.resetComponents();
+    // resetComponents() builds a fresh Joypad (its select bits are part of the
+    // reset state) — re-link the SGB transport that loadROM attached above.
+    this.joypad.sgb = this.sgb || null;
+    // Cache for in-app resets: without this, resetGame() would reboot with the
+    // built-in fast boot instead of the user's authentic boot ROM.
+    this._bootBytes = boot;
     if (saveData) this.cart.loadSav(saveData);
     // Hot-loop bindings (runFrame calls these thousands of times per frame)
     this._cpuStep = this.cpu.step.bind(this.cpu);
+    // APU tick batching: audio timestamps only need ~ms accuracy, so defer APU
+    // ticks into ~96 T-cycle (23 µs) batches instead of ticking per CPU
+    // instruction — removes ~19k call frames/frame on double-speed CGB with no
+    // audible difference. Flushed at frame end and around save/load.
+    this._apuPending = 0;
     this._tickParts = (n) => {
       // CGB double speed: the CPU runs twice as fast, so timed components
       // see half as many of their (4.19 MHz) cycles per CPU cycle.
       const slow = this.cpu.doubleSpeed ? (n >> 1) : n;
       this.timer.tick(slow);
       this.ppu.tick(slow);
-      this.apu.tick(slow);
+      this._apuPending += slow;
+      if (this._apuPending >= 96) { this.apu.tick(this._apuPending); this._apuPending = 0; }
       this.serial.tick(slow);
       this.mmu.dmaTick(slow);
       if (this.ppu.hdmaTick) this.ppu.hdmaTick();
     };
   }
 
+  // Push any batched APU cycles through before state capture / frame end.
+  _flushApu() {
+    if (this._apuPending) { this.apu.tick(this._apuPending); this._apuPending = 0; }
+  }
+
   resetComponents() {
+    this._apuPending = 0; // fresh APU timeline: drop any batched cycles
     this.cpu.reset();
     this.ppu.reset();
     this.apu.reset();
@@ -98,6 +127,7 @@ class GameBoy {
 
   // ---- save states ----
   saveState() {
+    this._flushApu(); // no un-emulated cycles hiding in the batcher
     const c = this.cpu, p = this.ppu, a = this.apu, t = this.timer, m = this.mmu, k = this.cart;
     const isCgb = this.mmu.cgb;
     const header = {
@@ -147,6 +177,7 @@ class GameBoy {
     const { header, blobs } = decodeState(u8);
     if (header.v > 2) throw new Error('Unsupported state version');
     if (!!header.cgb !== !!this.mmu.cgb) throw new Error('State is for a different console type');
+    this._apuPending = 0; // the loaded state owns the APU timeline from here
     const c = this.cpu, p = this.ppu, a = this.apu, t = this.timer, m = this.mmu, k = this.cart;
     Object.assign(c, header.cpu);
     // Strip undefined so older/newer state versions never clobber live fields
@@ -189,9 +220,10 @@ class GameBoy {
 
   stepInstruction() {
     // one CPU step with full component ticking (slower than runFrame's loop
-    // but identical semantics); returns m-cycles consumed
+    // but identical semantics); returns m-cycles consumed. _tickParts already
+    // halves internally at double speed — pass raw cycles, never pre-scale.
     const cycles = this._cpuStep ? this._cpuStep() : this.cpu.step();
-    if (this._tickParts) this._tickParts(this.cpu.doubleSpeed ? cycles * 2 : cycles);
+    if (this._tickParts) this._tickParts(cycles);
     return cycles;
   }
 
@@ -218,6 +250,10 @@ class GameBoy {
       if (this.ppu.frameComplete) break; // vblank reached: frame is on screen
     }
     if (this.cheats) this.cheats.applyRAM(this.mmu); // GameShark: once per frame
+    this._flushApu(); // emit the frame's final audio samples
+    // SGB VRAM transfer: a pending _TRN command latches; the next completed
+    // frame delivers 8000-8FFF to the SGB (real hardware reads over 5 frames).
+    if (this.sgb && this.sgb.pendingTrn) this.sgb.consumeVramBlock(this.ppu.vram.subarray(0, 0x1000));
     return fb;
   }
 
