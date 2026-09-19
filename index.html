@@ -51,6 +51,36 @@
       padding: 1px 6px; display: none;
     }
     header .badge.on { display: inline-block; }
+    /* practice HUD (in-game, toggleable) */
+    #practice-hud {
+      position: absolute; top: 6px; left: 8px; display: none;
+      align-items: center; gap: 10px;
+      font: 11px Hack, monospace; color: #e8e3f2;
+      background: rgba(16, 12, 20, 0.72); border-radius: 4px;
+      padding: 3px 8px; pointer-events: none; z-index: 5;
+      font-variant-numeric: tabular-nums; text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+    }
+    #practice-hud.on { display: flex; }
+    #practice-hud #hud-timer { color: #ffd479; font-size: 12px; }
+    #practice-hud #hud-best { color: #9ad1a2; }
+    #practice-hud #hud-frames { color: #b9a8d8; min-width: 34px; text-align: left; }
+    #practice-hud #hud-inputs { display: flex; gap: 3px; }
+    #practice-hud #hud-inputs .inkey {
+      min-width: 16px; text-align: center; padding: 1px 3px; border-radius: 3px;
+      background: rgba(70, 60, 80, 0.6); color: #cfc4e2; font-size: 10px;
+    }
+    #practice-hud #hud-inputs .inkey.on { background: #ffd479; color: #201a10; }
+    /* ghost race banner */
+    #ghost-status {
+      position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%);
+      display: none; align-items: center; gap: 6px;
+      font: 10px Hack, monospace; color: #cfc4e2; white-space: nowrap;
+      background: rgba(16, 12, 20, 0.78); border-radius: 4px; padding: 3px 8px;
+      pointer-events: auto; z-index: 5;
+    }
+    #ghost-status .sbutton { font-size: 10px; padding: 1px 6px; }
+    #ghost-status.on { display: flex; }
+    #ghost-status #ghost-progress { color: #58e8c8; min-width: 30px; }
 
     main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
     #center { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; position: relative; }
@@ -100,6 +130,7 @@
     /* ---- playing state ---- */
     #bezel {
       display: none;
+      position: relative;
       padding: 12px; border-radius: var(--radius);
       background: var(--bg-lift);
     }
@@ -108,6 +139,22 @@
     canvas {
       display: block; border-radius: var(--radius); background: #000;
       image-rendering: pixelated; image-rendering: crisp-edges;
+    }
+
+    /* ---- ghost picture-in-picture: a sibling panel BESIDE the screen,
+       never on top of the game ---- */
+    #play-row { display: none; }
+    #play-row.visible { display: flex; align-items: flex-start; gap: 10px; }
+    #ghost-pip {
+      display: none; flex-direction: column; align-items: center; gap: 3px;
+      padding: 6px; border-radius: var(--radius); background: var(--bg-lift);
+      border: 1px solid var(--bg-hover);
+      align-self: stretch; justify-content: flex-start;
+    }
+    #ghost-pip.on { display: flex; }
+    #ghost-pip #ghost-screen { width: 160px; height: 144px; }
+    #ghost-pip-label {
+      font: 10px Hack, monospace; color: #58e8c8; letter-spacing: 1px;
     }
 
     /* ---- in-game settings row (per-game + global, above actions) ---- */
@@ -209,7 +256,18 @@
     .overlay .bindrow button.listening { border-color: var(--primary); color: var(--primary); }
     .overlay .more-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
     .overlay .more-grid .sbutton { font-size: 11px; }
-    .overlay .menu-sec + .menu-sec { margin-top: 10px; }
+    /* menu launchpad: four category tiles */
+    .overlay .cat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .overlay .cat-tile {
+      border: 1px solid var(--bg-hover); border-radius: var(--radius);
+      padding: 12px 12px 10px; cursor: pointer; user-select: none;
+      background: var(--bg); transition: border-color 0.1s;
+    }
+    .overlay .cat-tile:hover, .overlay .cat-tile:focus { border-color: var(--primary); outline: none; }
+    .overlay .cat-tile .cat-name { color: var(--primary); font-size: 13px; margin-bottom: 4px; }
+    .overlay .cat-tile .cat-desc { color: var(--text-soft); font-size: 10px; line-height: 1.5; }
+    .overlay .kv .k[style] { color: var(--text-soft); }
+    .overlay .kv .k:hover { color: var(--primary); }
     .overlay .sec-label {
       color: var(--text-soft); font-size: 10px; text-transform: uppercase;
       letter-spacing: 0.09em; margin: 0 0 5px;
@@ -224,6 +282,18 @@
     .overlay .sbutton:active { background: var(--bg-lift); }
     .overlay .box.hidden { display: none; }
     .overlay .hint { color: var(--text-soft); font-size: 11px; line-height: 1.6; }
+    /* practice panel */
+    .statline { display: flex; justify-content: space-between; align-items: baseline; font-size: 15px; color: var(--text); }
+    .statline #prac-timer { font-size: 20px; color: var(--primary); }
+    #prac-inputs { display: flex; gap: 6px; }
+    #prac-inputs .inkey {
+      min-width: 22px; text-align: center; padding: 3px 5px; border-radius: 4px;
+      background: #221d24; color: var(--text-soft); font-size: 11px; user-select: none;
+    }
+    #prac-inputs .inkey.on { background: var(--primary); color: #14121a; }
+    .finder-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; }
+    .finder-row.watch { color: var(--primary); }
+    #finder-watches { margin-bottom: 6px; border-bottom: 1px solid #2a2430; padding-bottom: 6px; }
     .overlay .actions2 { display: flex; gap: 8px; }
     .overlay .actions2 .sbutton { flex: 1; }
   </style>
@@ -247,7 +317,8 @@
           <rect x="50" y="20" width="60" height="44" rx="2" fill="#8fae52"/>
           <rect x="50" y="20" width="60" height="4" fill="#a3c262" opacity="0.5"/>
           <text x="80" y="45" font-family="Hack, monospace" font-size="9" fill="#3c4a24" text-anchor="middle">POCKETGB</text>
-          <path d="M56 92h10v-6h10v10h6v10H72v6H62v-6H50V96h6z" fill="#403840" transform="translate(0,-2)"/>
+          <rect x="60" y="86" width="12" height="26" rx="2" fill="#403840"/>
+          <rect x="53" y="93" width="26" height="12" rx="2" fill="#403840"/>
           <circle cx="100" cy="98" r="7" fill="#b386d3"/>
           <circle cx="114" cy="106" r="7" fill="#b386d3" opacity="0.75"/>
           <g fill="#403840" transform="rotate(-25 122 128)">
@@ -260,9 +331,22 @@
         <div class="grid" id="library-grid"></div>
       </div>
 
-      <div id="bezel">
-        <canvas id="screen" width="160" height="144"></canvas>
+      <div id="play-row">
+        <div id="bezel">
+          <canvas id="screen" width="160" height="144"></canvas>
+          <div id="practice-hud">
+            <span id="hud-timer">0:00.00</span>
+            <span id="hud-best">best —</span>
+            <span id="hud-frames">0f</span>
+            <span id="hud-inputs"></span>
+          </div>
+        </div>
+        <div id="ghost-pip">
+          <div id="ghost-pip-label">ghost</div>
+          <canvas id="ghost-screen" width="160" height="144"></canvas>
+        </div>
       </div>
+      <div id="ghost-status">ghost: <span id="ghost-progress">armed</span> — reset (F8) starts the race together · <button class="sbutton" id="ghost-startnow">start now</button> · <button class="sbutton" id="ghost-cancel">cancel</button></div>
 
       <!-- cheats overlay -->
       <div class="overlay" id="ov-cheats">
@@ -279,6 +363,43 @@
           <div class="list" id="cheat-list"></div>
           <div class="hint">GameShark codes edit RAM — 01 + value + address, e.g. 010238CD writes 02 to CD38. Game Genie codes patch ROM (XXXYYY or XXXYYYZZZ with compare).</div>
           <div class="actions2"><button class="sbutton" id="cheat-close">close</button></div>
+        </div>
+      </div>
+
+      <!-- cheat finder overlay (RAM scanner) -->
+      <div class="overlay" id="ov-finder">
+        <div class="box">
+          <h2>cheat finder</h2>
+          <div class="row">
+            <input type="text" id="finder-input" placeholder="value (0-255, hex like 63 or decimal)" spellcheck="false">
+          </div>
+          <div class="row">
+            <button class="sbutton" id="finder-search">search</button>
+            <button class="sbutton" id="finder-unknown">unknown init</button>
+            <button class="sbutton" id="finder-narrow">narrow…</button>
+            <button class="sbutton" id="finder-reset">reset</button>
+          </div>
+          <div class="row" id="finder-narrow-row" style="display:none">
+            <select id="finder-op" style="width:auto">
+              <option value="eq">= value</option>
+              <option value="ne">≠ value</option>
+              <option value="lt">&lt; value</option>
+              <option value="gt">&gt; value</option>
+              <option value="changed">changed</option>
+              <option value="unchanged">unchanged</option>
+              <option value="plus">+ delta</option>
+              <option value="minus">− delta</option>
+            </select>
+            <input type="text" id="finder-narrow-val" placeholder="value/delta" spellcheck="false" style="width:110px">
+            <button class="sbutton" id="finder-apply">apply</button>
+          </div>
+          <div class="row" id="finder-narrow-hint" style="display:none">
+            <span class="hint">changed/unchanged compare against the previous scan — play a moment, then apply</span>
+          </div>
+          <div class="err" id="finder-err"></div>
+          <div class="list" id="finder-list"></div>
+          <div class="hint">search RAM while paused or playing, then narrow with changed/unchanged until a few addresses remain. freeze writes a real GameShark code into your cheat list.</div>
+          <div class="actions2"><button class="sbutton" id="finder-close">close</button></div>
         </div>
       </div>
 
@@ -329,6 +450,12 @@
           <pre id="disasm-list" style="font-size: 11px; line-height: 1.55; margin: 0; font-variant-numeric: tabular-nums; min-height: 200px;"></pre>
           <div class="kv"><span class="k">VRAM tiles (bank 0, all 384)</span></div>
           <canvas id="vram-view" width="384" height="128" style="width: 384px; image-rendering: pixelated; background: #151317;"></canvas>
+          <div class="kv"><span class="k">cartridge heatmap</span>
+            <button class="sbutton" id="heat-clear">clear</button>
+          </div>
+          <div class="hint" id="heat-summary">no samples yet</div>
+          <canvas id="heat-canvas" width="512" height="160" style="width: 512px; image-rendering: pixelated; background: #151317;"></canvas>
+          <div class="hint">one sample per frame at the CPU's PC — bright = hot. bank rows are physical ROM banks; the leftmost gap is bank 0's fixed area.</div>
           <div class="actions2"><button class="sbutton" id="debug-close">close</button></div>
         </div>
       </div>
@@ -350,7 +477,10 @@
             <button class="sbutton" id="clock-noon">noon</button>
           </div>
           <div class="hint">For MBC3 games (Pokémon G/S/C, Harvest Moon). Changes persist in the battery save. Morning=6:00, night=18:00.</div>
-          <div class="actions2"><button class="sbutton" id="clock-close">close</button></div>
+          <div class="actions2">
+            <button class="sbutton" id="clock-back">‹ back</button>
+            <button class="sbutton" id="clock-close">close</button>
+          </div>
         </div>
       </div>
 
@@ -366,32 +496,6 @@
         </div>
       </div>
 
-      <!-- ROM header editor overlay -->
-      <div class="overlay" id="ov-hdr">
-        <div class="box">
-          <h2>edit ROM header</h2>
-          <div class="hint" id="hdr-file">—</div>
-          <label class="hint">title (max 15 chars)</label>
-          <input type="text" id="hdr-title" maxlength="15" />
-          <label class="hint">region</label>
-          <select id="hdr-region">
-            <option value="0">Japan (0)</option>
-            <option value="1">Overseas (1)</option>
-          </select>
-          <label class="hint">color (CGB compatibility)</label>
-          <select id="hdr-cgb">
-            <option value="0">DMG only (00)</option>
-            <option value="128">DMG+CGB (80)</option>
-            <option value="192">CGB only (C0)</option>
-          </select>
-          <div class="err" id="hdr-err"></div>
-          <div class="actions2">
-            <button class="sbutton" id="hdr-save">save to ROM</button>
-            <button class="sbutton" id="hdr-close">cancel</button>
-          </div>
-          <div class="hint">Writes a backup copy (.hdrbak) next to the ROM before saving. The game reloads with the new header.</div>
-        </div>
-      </div>
 
       <!-- screenshot gallery overlay -->
       <div class="overlay" id="ov-gallery">
@@ -405,6 +509,24 @@
       </div>
 
       <!-- key bindings overlay -->
+      <div class="overlay" id="ov-practice">
+        <div class="box">
+          <h2>practice</h2>
+          <div class="row">
+            <button class="sbutton" id="prac-toggle">show timer: off</button>
+            <button class="sbutton" id="prac-start">start</button>
+            <button class="sbutton" id="prac-stop">stop</button>
+            <button class="sbutton" id="prac-reset">reset attempt (F8)</button>
+          </div>
+          <div class="row statline"><span id="prac-timer">0:00.00</span><span id="prac-frames">frame 0</span></div>
+          <div class="row hint">the timer is loadless: it restarts automatically on every reset (R or F8) and the best split updates when you reset a faster attempt</div>
+          <h2 style="margin-top:10px">input display</h2>
+          <div class="row" id="prac-inputs"></div>
+          <div class="row hint">live button state — mirrors the HUD when the timer overlay is on</div>
+          <div class="actions2"><button class="sbutton" id="prac-close">close</button></div>
+        </div>
+      </div>
+
       <div class="overlay" id="ov-keys">
         <div class="box">
           <h2>keyboard</h2>
@@ -446,45 +568,91 @@
 
     <!-- menu overlay -->
     <div class="overlay" id="ov-menu">
+      <!-- launchpad: four category tiles, submenus swap in place -->
       <div class="box" id="menu-panel">
         <h2>menu</h2>
-        <div class="menu-sec">
-          <div class="sec-label">game</div>
-          <div class="more-grid">
-            <button class="sbutton" id="btn-library">library</button>
-            <button class="sbutton" id="btn-reset">reset</button>
+        <div class="cat-grid">
+          <div class="cat-tile" id="cat-game" tabindex="0">
+            <div class="cat-name">game</div>
+            <div class="cat-desc">library · reset · practice timer</div>
           </div>
-        </div>
-        <div class="menu-sec">
-          <div class="sec-label">options</div>
-          <div class="more-grid">
-            <button class="sbutton" id="btn-cheats">cheats</button>
-            <button class="sbutton" id="btn-effects">effects</button>
-            <button class="sbutton" id="btn-keys">keys</button>
-            <button class="sbutton" id="btn-debug">debug</button>
+          <div class="cat-tile" id="cat-options" tabindex="0">
+            <div class="cat-name">options</div>
+            <div class="cat-desc">cheats · finder · display · keys · debug</div>
           </div>
-        </div>
-        <div class="menu-sec">
-          <div class="sec-label">capture</div>
-          <div class="more-grid">
-            <button class="sbutton" id="btn-shot">screenshot</button>
-            <button class="sbutton" id="btn-gif">record gif</button>
-            <button class="sbutton" id="btn-webm">record video</button>
-            <button class="sbutton" id="btn-movie-rec">record movie</button>
-            <button class="sbutton" id="btn-movie-play">play movie…</button>
+          <div class="cat-tile" id="cat-capture" tabindex="0">
+            <div class="cat-name">capture</div>
+            <div class="cat-desc">screenshots · gif/video · movies · ghost</div>
           </div>
-        </div>
-        <div class="menu-sec">
-          <div class="sec-label">hardware</div>
-          <div class="more-grid">
-            <button class="sbutton" id="btn-link">link cable</button>
-            <button class="sbutton" id="btn-clock">game clock</button>
-            <button class="sbutton" id="btn-printer">printer: off</button>
-            <button class="sbutton" id="btn-bootrom">boot rom: off</button>
+          <div class="cat-tile" id="cat-hardware" tabindex="0">
+            <div class="cat-name">hardware</div>
+            <div class="cat-desc">link cable · clock · printer · boot rom</div>
           </div>
         </div>
         <div class="hint">tab = fast-forward · backspace = rewind · gamepad supported</div>
         <div class="actions2"><button class="sbutton" id="menu-close">close</button></div>
+      </div>
+
+      <!-- game submenu -->
+      <div class="box hidden" id="sub-game">
+        <div class="kv"><span class="k" style="cursor:pointer" id="back-game">‹ menu</span><h2>game</h2></div>
+        <div class="more-grid">
+          <button class="sbutton" id="btn-library">library</button>
+          <button class="sbutton" id="btn-reset">reset</button>
+          <button class="sbutton" id="btn-practice">practice</button>
+        </div>
+        <div class="actions2">
+          <button class="sbutton" id="sub-game-back">back</button>
+          <button class="sbutton" id="sub-game-close">close</button>
+        </div>
+      </div>
+
+      <!-- options submenu -->
+      <div class="box hidden" id="sub-options">
+        <div class="kv"><span class="k" style="cursor:pointer" id="back-options">‹ menu</span><h2>options</h2></div>
+        <div class="more-grid">
+          <button class="sbutton" id="btn-cheats">cheats</button>
+          <button class="sbutton" id="btn-finder">finder</button>
+          <button class="sbutton" id="btn-effects">effects</button>
+          <button class="sbutton" id="btn-keys">keys</button>
+          <button class="sbutton" id="btn-debug">debug</button>
+        </div>
+        <div class="actions2">
+          <button class="sbutton" id="sub-options-back">back</button>
+          <button class="sbutton" id="sub-options-close">close</button>
+        </div>
+      </div>
+
+      <!-- capture submenu -->
+      <div class="box hidden" id="sub-capture">
+        <div class="kv"><span class="k" style="cursor:pointer" id="back-capture">‹ menu</span><h2>capture</h2></div>
+        <div class="more-grid">
+          <button class="sbutton" id="btn-shot">screenshot</button>
+          <button class="sbutton" id="btn-gif">record gif</button>
+          <button class="sbutton" id="btn-webm">record video</button>
+          <button class="sbutton" id="btn-movie-rec">record movie</button>
+          <button class="sbutton" id="btn-movie-play">play movie…</button>
+          <button class="sbutton" id="btn-ghost">race ghost…</button>
+        </div>
+        <div class="actions2">
+          <button class="sbutton" id="sub-capture-back">back</button>
+          <button class="sbutton" id="sub-capture-close">close</button>
+        </div>
+      </div>
+
+      <!-- hardware submenu -->
+      <div class="box hidden" id="sub-hardware">
+        <div class="kv"><span class="k" style="cursor:pointer" id="back-hardware">‹ menu</span><h2>hardware</h2></div>
+        <div class="more-grid">
+          <button class="sbutton" id="btn-link">link cable</button>
+          <button class="sbutton" id="btn-clock">game clock</button>
+          <button class="sbutton" id="btn-printer">printer: off</button>
+          <button class="sbutton" id="btn-bootrom">boot rom: off</button>
+        </div>
+        <div class="actions2">
+          <button class="sbutton" id="sub-hardware-back">back</button>
+          <button class="sbutton" id="sub-hardware-close">close</button>
+        </div>
       </div>
 
       <!-- link cable panel (opens on top of the menu) -->
@@ -533,11 +701,14 @@
   <script src="src/core/romtitle.js"></script>
   <script src="src/core/printer.js"></script>
   <script src="src/core/movie.js"></script>
+<script src="src/core/ghost.js"></script>
 <script src="src/core/apu.js"></script>
 <script src="src/core/timer.js"></script>
 <script src="src/core/joypad.js"></script>
 <script src="src/core/cartridge.js"></script>
 <script src="src/core/cheats.js"></script>
+<script src="src/core/sgb.js"></script>
+<script src="src/core/heatmap.js"></script>
 <script src="src/core/serial.js"></script>
 <script src="src/core/gameboy.js"></script>
 <script src="app.js"></script>
