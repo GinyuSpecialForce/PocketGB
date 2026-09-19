@@ -9,17 +9,15 @@ Validated against industry-standard hardware test suites.
 
 ![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-macOS-black?logo=apple&logoColor=white)
-![Tests](https://img.shields.io/badge/project_tests-117_passing-brightgreen)
+![Tests](https://img.shields.io/badge/project_tests-154_passing-brightgreen)
 ![dmg-acid2](https://img.shields.io/badge/dmg_acid2-pixel_perfect-success)
 ![cgb-acid2](https://img.shields.io/badge/cgb_acid2-pixel_perfect-success)
-
-<img width="479" height="560" alt="Screen Shot 2026-09-17 at 7 56 36 PM" src="https://github.com/user-attachments/assets/323c3590-d2b0-445f-a371-506c2aa3229c" />
 
 </div>
 
 ---
 
-## Getting started
+## 🚀 Getting started
 
 Requires [Node.js](https://nodejs.org/) and npm.
 
@@ -32,15 +30,15 @@ Drop a `.gb` or `.gbc` ROM onto the window, or use **File → Open ROM…** (<kb
 
 ---
 
-## Accuracy
+## 🎯 Accuracy
 
 | Suite | Result |
 |---|---|
-| [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (PPU, DMG) | **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real DMG hardware |
-| [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) (PPU, Color) | **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real Game Boy Color hardware |
-| [Blargg `cpu_instrs`](https://github.com/retrio/gb-test-roms) (CPU) | **11 / 11** individual tests pass, plus `02-interrupts` |
-| [Blargg `instr_timing` / `mem_timing`](https://github.com/retrio/gb-test-roms) | included and run; known-failing on bus-timing subtleties (documented, reported as skips) |
-| Project test suite | 120 tests (CPU ops & flags, MBC banking incl. MBC1M/MBC30/HuC, timer quirks, PPU rendering, CGB memory/palette/DMA/speed, save states, GIF encoders, cheat engine, patch decoders, movie replay, ROM-title extraction, smoke ROM) |
+| [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (PPU, DMG) | ✅ **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real DMG hardware |
+| [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) (PPU, Color) | ✅ **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real Game Boy Color hardware |
+| [Blargg `cpu_instrs`](https://github.com/retrio/gb-test-roms) (CPU) | ✅ **11 / 11** individual tests pass, plus `02-interrupts` |
+| [Blargg `instr_timing` / `mem_timing`](https://github.com/retrio/gb-test-roms) | ⚠️ included and run; known-failing on bus-timing subtleties (documented, reported as skips) |
+| Project test suite | ✅ 145 tests (CPU ops & flags, MBC banking incl. MBC1M/MBC30/HuC, timer quirks, PPU rendering, CGB memory/palette/DMA/speed, save states, GIF encoders, cheat engine + finder, patch decoders, movie replay, ghost racer, SGB packets/palettes/borders, cartridge heatmap, ROM-title extraction, smoke ROM) |
 
 <details>
 <summary>How the PPU stays accurate</summary>
@@ -58,12 +56,12 @@ its 4-cycle window, TIMA write cancellation, and DIV/TAC write edge effects.
 
 ---
 
-## Features
+## ✨ Features
 
 - **Emulation** — SM83 CPU (full base + CB instruction sets, HALT bug, interrupts), DMG PPU, 4-channel APU (2 pulse, wave, noise) with frame sequencer, hardware-accurate DIV/TIMA timer, OAM DMA with startup delay, MBC1 (+MBC1M multicarts) / MBC3 (+ RTC) / MBC30 / MBC5 / HuC1 / HuC3 and ROM-only cartridges
 - **Game Boy Color** — full CGB mode: 32 KB banked WRAM, 16 KB banked VRAM with tile/map attributes, 8 BG + 8 OBJ palettes (32K colors), HDMA/GDMA transfers, double-speed mode (<kbd>STOP</kbd> + <kbd>KEY1</kbd>), BGR555 color output, and DMG-compatibility register behavior
 - **Boot ROMs & generated intro** — optionally load original boot ROM dumps for the authentic logo drop, boot chime, and CGB color intro; without a dump, a generated intro plays the same falling-logo animation with chime and CGB color sweep, straight from the cartridge's own boot data
-- **Auto-updates** — electron-updater checks GitHub releases in the background, surfaces updates in-app, and installs on restart (Help ▸ Check for Updates…)
+- **Auto-updates** — dual-mode: installed builds use electron-updater against GitHub releases; **git clones self-update** (periodic + Help ▸ Check for Updates…) via `git fetch` + fast-forward-only merge — local commits are never discarded, and `npm install` runs automatically when dependencies change
 - **Persistence** — battery saves (`.sav`), MBC3 RTC storage, and 10 save-state slots per game (<kbd>⌘1</kbd>–<kbd>⌘0</kbd> to load, <kbd>⌘⇧1</kbd>–<kbd>⌘⇧0</kbd> to save), auto-flushed every few seconds and on quit
 - **Display** — integer-scaled canvas, full color for CGB games; three palettes (DMG Green, Pocket Gray, Ember) for DMG games, selectable in-app and persisted
 - **Audio** — Web Audio output matched to your device's real sample rate (no crackle from rate mismatch)
@@ -73,7 +71,6 @@ its 4-cycle window, TIMA write cancellation, and DIV/TAC write edge effects.
 - **LCD effects & shader packs** — LCD ghosting, scanlines, a WebGL shader (subpixel LCD grid + optional screen curvature), plus loadable `.pbg-fx` shader packs: JSON + GLSL with validated uniforms, per-game persistence, and hot-reload when you edit the file
 - **ROM library** — home screen with recent ROMs, one click to relaunch; cards show cover art (your chosen screenshot, else the newest save-state thumbnail); delete a game's saves or remove it from the library with two-step confirmation
 - **Screenshot history** — every screenshot is filed into a per-game gallery (newest 100 kept), browsable as a filmstrip, with per-shot delete and one-click *set as cover art*
-- **ROM header editor** — edit title, region, and CGB-compatibility flag right from a library card (a `.hdrbak` backup is written first); the game reloads with the new header immediately
 - **Library naming** — clean, junk-filtered titles from the ROM header (handles `0xFF`/NUL padding) with filename fallback; one shared extractor powers every display site, self-repairs stored names on relaunch
 - **Remappable input** — keyboard bindings with a press-to-rebind editor
 - **Per-game settings** — palette, scale, and cheats remembered per ROM
@@ -84,11 +81,16 @@ its 4-cycle window, TIMA write cancellation, and DIV/TAC write edge effects.
 - **Game Boy Printer** — full protocol (framing, checksums, RLE, 2bpp tiles): print in-game and PocketGB saves your printout as a PNG. Game Boy Camera photo registers are emulated too
 - **Game clock** — live RTC control panel: clock rates up to a full Pokémon day per 24 s, morning/night/noon quick-sets, persisted into battery saves
 - **Movie recording** — record input to a `.pgm` file and replay it deterministically (state anchor + ROM fingerprint + per-frame input masks)
+- **Ghost racer** — load any recorded `.pgm` and race your best run: loading **arms** the ghost, and your next reset (F8) starts both timelines together from the recording's anchor — or hit `start now` in the banner to launch immediately. The ghost replays at full palette color in its own panel **beside** the game screen (never overlapping it), pausing/freezing with the game; captures stay ghost-free
+- **Cheat finder** — built-in RAM scanner: search a value, narrow with changed/unchanged/greater/less or deltas, watch candidates live, and freeze any hit into a real GameShark code in your cheat list
+- **Speedrun practice kit** — toggleable in-game HUD (loadless timer, best split, frame counter, live input display) that stays on screen while you play; <kbd>F8</kbd> instantly resets the attempt and the timer restarts on every reset
+- **Super Game Boy** — command-packet transport (P14/P15 bit protocol), SNES palettes (PAL01/23/03/12, PAL_SET, PAL_TRN), attribute maps (ATTR_BLK/LIN/DIV/CHR/TRN/SET), custom borders (CHR_TRN + PCT_TRN composited around the game), screen mask, and MLT_REQ multiplayer detection — headers permitting, as on hardware
+- **Cartridge heatmap** — per-frame PC sampling rendered as a per-bank heat canvas in the debug overlay: watch which banks and regions of the cartridge actually execute, hottest first
 - **Convenience** — Recent ROMs menu, drag-and-drop from anywhere in the window, pause (<kbd>⌘P</kbd>), mute (<kbd>⌘M</kbd>), reset (<kbd>⌘R</kbd>)
 
 ---
 
-## Controls
+## 🎮 Controls
 
 | Key | Button |
 |---|---|
@@ -103,13 +105,13 @@ its 4-cycle window, TIMA write cancellation, and DIV/TAC write edge effects.
 
 ---
 
-## Performance
+## ⚡ Performance
 
 The core runs a full frame in **~1.9 ms** (≈ 517 fps cap, 8.6× realtime headroom), measured on a CPU-heavy workload — rendering, audio, and timers included. Hot paths are allocation-free per frame; the timer is O(1) via falling-edge counting.
 
 ---
 
-## Project layout
+## 📁 Project layout
 
 <details>
 <summary>Directory structure</summary>
@@ -136,7 +138,7 @@ The `src/core` layer is deliberately dependency-free: it loads both as browser g
 
 ---
 
-## Testing
+## 🧪 Testing
 
 ```bash
 npm test             # unit tests + Blargg cpu_instrs + dmg-acid2 + cgb-acid2
@@ -147,7 +149,7 @@ The dmg-acid2 and cgb-acid2 tests run their ROMs headless until the screen stabi
 
 ---
 
-## Packaging
+## 📦 Packaging
 
 ```bash
 npm run dist:mac     # signed macOS build via electron-builder
@@ -157,13 +159,13 @@ npm run dist:linux   # Linux
 
 ---
 
-## Data locations
+## 💾 Data locations
 
 Saves, save states, and the recent-ROMs list live under Electron's `userData` directory: `~/Library/Application Support/pocketgb/` on macOS.
 
 ---
 
-## Notes
+## 📝 Notes
 
 > [!NOTE]
 > CGB games run in full-color Game Boy Color mode; DMG games keep their classic look. A color game can still be forced into DMG mode from the ROM library settings.
