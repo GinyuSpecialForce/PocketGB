@@ -107,9 +107,10 @@ function updateLinkStatus() {
 
 async function doLinkHost() {
   const port = parseInt($('link-port').value, 10);
-  await window.pocketgb.linkHost(Number.isFinite(port) ? port : 0);
+  const lan = !!( $('link-lan') && $('link-lan').checked );
+  await window.pocketgb.linkHost(Number.isFinite(port) ? port : 0, lan);
   updateLinkStatus(); // actual port arrives via onLinkHosting
-  setStatus('link hosting…');
+  setStatus(lan ? 'link hosting on the LAN — your friend joins your IP…' : 'link hosting (local machine only)…');
 }
 async function doLinkJoin() {
   const port = parseInt($('link-port').value, 10);
@@ -134,6 +135,40 @@ function showMenuPanel(id) {
   $(id).classList.remove('hidden');
 }
 $('btn-link').addEventListener('click', () => { updateLinkStatus(); showMenuPanel('link-panel'); });
+// ---- retroachievements panel ----
+async function raRefreshStatus() {
+  if (!window.pocketgb.raWhoami) return;
+  try {
+    const who = await window.pocketgb.raWhoami();
+    const el = $('ra-status');
+    if (el) el.textContent = who.user ? `logged in as ${who.user} — achievements will track while you play` : 'logged out';
+    if (who.user && !$('ra-user').value) $('ra-user').value = who.user;
+  } catch { /* status text stays as-is */ }
+}
+$('btn-ra').addEventListener('click', () => { raRefreshStatus(); showMenuPanel('ra-panel'); });
+$('ra-back').addEventListener('click', () => showMenuPanel('menu-panel'));
+$('ra-close').addEventListener('click', () => { toggleOverlay('ov-menu'); showMenuPanel('menu-panel'); });
+$('ra-login').addEventListener('click', async () => {
+  const user = ($('ra-user').value || '').trim();
+  const key = ($('ra-key').value || '').trim();
+  if (!user || !key) { $('ra-status').textContent = 'enter your username and web API key'; return; }
+  $('ra-status').textContent = 'logging in…';
+  const res = await window.pocketgb.raLogin(user, key);
+  if (res.ok) {
+    $('ra-status').textContent = `logged in as ${res.user} — ${res.score} points (${res.softcore} softcore)`;
+    setStatus(`retroachievements: logged in as ${res.user}`);
+    // a game may already be running: identify it now
+    raIdentifyCurrentRom();
+  } else {
+    $('ra-status').textContent = `login failed: ${res.error}`;
+  }
+});
+$('ra-logout').addEventListener('click', async () => {
+  await window.pocketgb.raLogout();
+  $('ra-status').textContent = 'logged out';
+  if (ra) { ra.enabled = false; ra.game = null; ra.state.clear(); }
+  setStatus('retroachievements: logged out');
+});
 $('link-back').addEventListener('click', () => showMenuPanel('menu-panel'));
 $('link-host').addEventListener('click', doLinkHost);
 $('link-join').addEventListener('click', doLinkJoin);
@@ -242,20 +277,32 @@ function loop(t) {
     }
     // ghost racer steps its own machine every produced frame so both
     // timelines advance at the same rate; blit() routes the framebuffer to
-    // the ghost PiP panel (a separate canvas beside the game, never on top)
+    // the ghost PiP panel (a separate canvas beside the game, never on top).
+    // Input echo trainer: the live player's mask feeds divergence tracking;
+    // the strip renders the recording's inputs around the current position.
+    let liveMask = window.PocketMovie.stateToMask(input.state);
     if (ghost && ghost.active) {
-      const gfb = ghost.step(0);
+      const gfb = ghost.step(liveMask);
       if (gfb) renderer.ghostFrame = gfb;
       const pct = $('ghost-progress');
       if (pct) pct.textContent = `${Math.round(ghost.progress * 100)}%`;
+      if (echoOn) paintEcho();
       if (ghost.done) {
         // attempt over: keep the panel for the final picture, re-arm so the
         // next reset (F8) starts the next race
         ghost.hold();
         $('ghost-progress').textContent = 'armed';
         $('ghost-pip-label').textContent = 'ghost · armed';
+        hideEcho();
         setStatus('ghost finished — you win');
       }
+    }
+    // MBC7 tilt: arrows steer the accelerometer (when a tilt game is loaded)
+    if (gb.cart && gb.cart.mbc7) {
+      const s = input.state;
+      const nx = (s.right ? 1 : 0) - (s.left ? 1 : 0);
+      const ny = (s.up ? 1 : 0) - (s.down ? 1 : 0);
+      gb.cart.mbc7.setTilt(nx, ny);
     }
     if (heatmap) heatmap.sample(gb.cpu.pc);
     const fb = gb.runFrame();
@@ -273,7 +320,20 @@ function loop(t) {
   }
   rewind.update(t);
   practice.onFrame();
+  if (ra && ra.enabled) { ra.frame(gb); }
   renderInputDisplay();
+
+  // debugger: a watchpoint fired mid-frame — pause and report where
+  if (gb._watchFired) {
+    gb._watchFired = false;
+    setPaused(true);
+    const hit = gb.watchpoints && gb.watchpoints.lastHit;
+    if (hit) {
+      const a = hit.addr.toString(16).toUpperCase().padStart(4, '0');
+      setStatus(`watchpoint $${a} ${hit.kind === 'r' ? 'read' : 'written'} — pc $${hit.pc.toString(16).toUpperCase().padStart(4, '0')}`);
+      renderWatchList();
+    }
+  }
 
   if (t - fpsLast >= 500) {
     fps = Math.round(framesThisSecond * 1000 / (t - fpsLast));
@@ -371,6 +431,7 @@ $('btn-ghost').addEventListener('click', () => {
     renderer.ghostFrame = null;
     $('ghost-status').classList.remove('on');
     $('ghost-pip').classList.remove('on');
+    hideEcho();
     $('ghost-startnow').textContent = 'start now';
     setStatus('ghost race ended');
     return;
@@ -414,9 +475,99 @@ $('ghost-cancel').addEventListener('click', () => {
   renderer.ghostFrame = null;
   $('ghost-status').classList.remove('on');
   $('ghost-pip').classList.remove('on');
+  hideEcho();
   $('ghost-startnow').textContent = 'start now';
   setStatus('ghost disarmed');
 });
+
+// ---- input echo trainer (ghost race: see the recorded inputs) ----
+// The ghost's inputs render as a scrolling glyph strip under the banner: a
+// column per frame, colored per button. "≠ pressed" lights when your input
+// diverges from the recording — from that frame on, the race is no longer a
+// mirror of your old run, which is exactly the thing to notice while
+// practicing. The ECHO button toggles the strip; position lives in ghost.js.
+let echoOn = false;
+function hideEcho() {
+  const el = $('input-echo');
+  if (el) el.classList.remove('on');
+  const dv = $('echo-diverge');
+  if (dv) dv.classList.remove('on');
+}
+function paintEcho() {
+  const cv = $('echo-canvas');
+  if (!cv || !ghost || !ghost.active || !echoOn) return;
+  const ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, COLS = 160;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(0, 0, W, H);
+  // column layout: newest at right; 8 rows, one per button (top→bottom:
+  // A B sel sta ▶ ◀ ▲ ▼), filled when the ghost presses it that frame.
+  // Window = the 160 frames ending at the ghost's current position — read
+  // straight from the recording, no side buffer to keep in sync.
+  const frames = ghost.frames, pos = ghost.pos;
+  const colW = W / COLS;
+  const rowH = H / 8;
+  const COLORS = ['#ff5f8f', '#5fb8ff', '#ffd25f', '#8fff6b', '#c09fff', '#c09fff', '#c09fff', '#c09fff'];
+  const divergeAt = ghost.divergedFromRecording ? ghost.divergenceFrame : null;
+  for (let c = 0; c < COLS; c++) {
+    const idx = pos - COLS + c; // frame index this column represents
+    if (idx < 0 || idx >= frames.length) continue;
+    const mask = frames[idx];
+    const x = c * colW;
+    for (let b = 0; b < 8; b++) {
+      if (mask & (1 << b)) {
+        ctx.fillStyle = COLORS[b];
+        ctx.fillRect(x, b * rowH, Math.max(1, colW - 0.5), rowH - 1);
+      }
+    }
+    if (divergeAt !== null && idx >= divergeAt) {
+      // everything from the moment you left the recorded path reads dimmer
+      ctx.fillStyle = 'rgba(255, 143, 107, 0.30)';
+      ctx.fillRect(x, 0, Math.max(1, colW), H);
+    }
+  }
+  const dv = $('echo-diverge');
+  if (dv) dv.classList.toggle('on', ghost.divergedFromRecording);
+}
+$('ghost-echo').addEventListener('click', () => {
+  echoOn = !echoOn;
+  $('ghost-echo').textContent = `echo: ${echoOn ? 'on' : 'off'}`;
+  const el = $('input-echo');
+  if (el) el.classList.toggle('on', echoOn);
+  if (!echoOn) hideEcho();
+});
+
+// ---- RetroAchievements ----
+// Logic runs here (compiled condition sets over live memory); network lives
+// in the main process (the COEP-locked renderer can only fetch app://).
+const ra = (window.PocketRA && window.pocketgb && window.pocketgb.raLogin)
+  ? new window.PocketRA.AchievementRuntime(null) : null;
+async function raIdentifyCurrentRom() {
+  if (!ra || !window.pocketgb.raSession || !romInfo || !romInfo.bytes) return;
+  try {
+    // chunked base64: spreading a 1 MB ROM through String.fromCharCode would
+    // blow the call stack (the existing btoa call sites are small images)
+    const u8 = new Uint8Array(romInfo.bytes);
+    let bin = '';
+    for (let i = 0; i < u8.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, u8.subarray(i, Math.min(i + 0x8000, u8.length)));
+    }
+    const res = await window.pocketgb.raSession(btoa(bin));
+    if (!res.ok) { if (res.error && res.error !== 'not logged in') setStatus(`retroachievements: ${res.error}`); return; }
+    ra.hardcore = true; // no save-state assists while hunting achievements
+    ra.loadFromSession(res.hash, res.game, true);
+    ra.pendingAwards.length = 0;
+    setStatus(`retroachievements: ${res.game.title} — ${res.game.achievements.length} achievements${ra.enabled ? '' : ' (none in core set)'}`);
+  } catch { /* achievements never block play */ }
+}
+function raInit() {
+  if (!ra) return;
+  ra.onUnlock((ach) => {
+    setStatus(`🏆 ${ach.title} — ${ach.description} (+${ach.points})`);
+    window.pocketgb.raAward(ach.id, ra.hardcore, ra.hash).catch(() => {});
+  });
+}
+raInit();
 
 // ---- debugger controls ----
 function dbgPause() { dbgRunning = false; setPaused(true); }
@@ -439,8 +590,57 @@ $('bp-add').addEventListener('click', () => {
 });
 $('bp-clear').addEventListener('click', () => { gb.clearBreakpoints(); setStatus('breakpoints cleared'); if (typeof debug !== 'undefined' && debug) debug.render(); });
 $('bp-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('bp-add').click(); });
+// watchpoints: break when the game READS/WRITES a memory address
+function parseHexAddr(raw) {
+  const v = parseInt((raw || '').replace(/^\$|^0x/gi, '').trim(), 16);
+  return Number.isFinite(v) && v >= 0 && v <= 0xFFFF ? v : null;
+}
+function renderWatchList() {
+  const el = $('wp-list');
+  if (!el) return;
+  el.textContent = '';
+  const wps = gb.watchpoints ? gb.watchpoints.list() : [];
+  for (const w of wps) {
+    const row = document.createElement('div');
+    row.className = 'finder-row';
+    row.textContent = `${w.kind === 'r' ? 'read' : 'write'} $${w.addr.toString(16).toUpperCase().padStart(4, '0')}`;
+    const del = document.createElement('button');
+    del.className = 'sbutton'; del.textContent = '×';
+    del.addEventListener('click', () => {
+      if (w.kind === 'r') gb.watchpoints.unwatchRead(w.addr); else gb.watchpoints.unwatchWrite(w.addr);
+      renderWatchList();
+    });
+    row.appendChild(del);
+    el.appendChild(row);
+  }
+  if (!wps.length) el.textContent = 'no watchpoints';
+}
+$('wp-add').addEventListener('click', () => {
+  const v = parseHexAddr($('wp-input').value);
+  if (v === null) { setStatus('bad watchpoint address'); return; }
+  const kind = $('wp-kind').value;
+  if (kind === 'r') gb.watchRead(v); else if (kind === 'w') gb.watchWrite(v); else gb.watchAccess(v);
+  $('wp-input').value = '';
+  renderWatchList();
+  dbgRunning = false; setPaused(false); // watchpoints require the fast loop
+  setStatus(`watchpoint $${v.toString(16).toUpperCase().padStart(4, '0')} (${kind}) — running`);
+});
+$('wp-clear').addEventListener('click', () => { gb.clearWatchpoints(); renderWatchList(); setStatus('watchpoints cleared'); });
 $('dbg-step').addEventListener('click', () => dbgStep(1));
 $('dbg-step8').addEventListener('click', () => dbgStep(8));
+$('dbg-over').addEventListener('click', () => {
+  dbgPause();
+  const t = window.PocketDebug.stepOverTarget(gb.cpu);
+  if (t === null) { dbgStep(1); return; }
+  gb.addBreakpoint(t);
+  dbgRunning = true; setPaused(false);
+  setStatus('step over…');
+});
+$('dbg-out').addEventListener('click', () => {
+  dbgPause();
+  const ret = window.PocketDebug.stepOutFrameReturn(gb.cpu);
+  if (ret) { gb.addBreakpoint(ret); dbgRunning = true; setPaused(false); setStatus('step out…'); }
+});
 $('dbg-run').addEventListener('click', () => { dbgRunning = true; setPaused(false); setStatus('running to breakpoint…'); });
 $('disasm-follow').addEventListener('click', () => {
   if (!debug) return;
@@ -496,10 +696,12 @@ async function loadRom(info) {
     }
   }
   const savData = info.savePath ? await window.pocketgb.readSav(info.savePath) : null;
+  if (ra && ra.enabled) ra.reset(); // achievements are per-boot; save-state jumps don't earn them
   // fresh game: stop any run-scoped features tied to the previous ROM
   if (ghost && ghost.active) { ghost.stop(); renderer.ghostFrame = null; }
   const gstat = $('ghost-status'); if (gstat) gstat.classList.remove('on');
   const gpip = $('ghost-pip'); if (gpip) gpip.classList.remove('on');
+  hideEcho();
   if (moviePlayer) { moviePlayer.reset(); }
   if (movieRecorder && movieRecorder.recording) { movieRecorder.recording = false; $('btn-movie-rec').textContent = 'record movie'; }
   capture.resetHistory();
@@ -528,6 +730,9 @@ async function loadRom(info) {
   const saved = await loadSetting('cheats', []);
   gb.cheats.restore(saved);
   renderCheatList();
+  // RetroAchievements: identify this ROM and arm the runtime (fire-and-forget;
+  // a failed lookup never blocks loading)
+  raIdentifyCurrentRom();
   // per-game settings
   if (!settingsLoaded) { await initSettings(); settingsLoaded = true; }
   for (const key of PER_GAME_KEYS) await applySetting(key);
@@ -582,6 +787,7 @@ function resetGame() {
   heatmap = window.PocketHeat ? new window.PocketHeat.CartridgeHeatmap(gb.cart) : null;
   renderHeatmap();
   rewind.reset();
+  if (ra && ra.enabled) ra.reset(); // new attempt: achievement progress restarts
   practice.onReset(); // loadless timing: the timer restarts on hard reset
   // the starting gun: an armed ghost launches with this reset so both
   // timelines (and the timer) begin at the same moment
@@ -878,6 +1084,7 @@ function toggleOverlay(id) {
 function renderCheatList() {
   const list = $('cheat-list');
   list.textContent = '';
+  const describe = window.PocketCheat && window.PocketCheat.describeCheat;
   const cheats = gb.cheats.all();
   for (let i = 0; i < cheats.length; i++) {
     const c = cheats[i];
@@ -886,16 +1093,26 @@ function renderCheatList() {
     const code = document.createElement('span');
     code.className = 'code';
     code.textContent = c.code;
-    code.title = c.kind === 'gs'
-      ? `gameshark: write 0x${c.value.toString(16)} to 0x${c.addr.toString(16)}`
-      : `game genie: 0x${c.addr.toString(16)} → 0x${c.value.toString(16)}${c.compare !== null ? ` (if 0x${c.compare.toString(16)})` : ''}`;
+    // What does this code DO? One plain-language line under the code (plus
+    // the raw bytes in the tooltip) so a typo or a wrong-game code is visible
+    // before it mangles anything.
+    const top = document.createElement('div');
+    top.className = 'cheat-top';
+    top.appendChild(code);
     const toggle = document.createElement('button');
     toggle.textContent = c.enabled ? 'on' : 'off';
     toggle.addEventListener('click', () => { gb.cheats.toggle(i); persistCheats(); renderCheatList(); });
     const del = document.createElement('button');
     del.textContent = '×';
     del.addEventListener('click', () => { gb.cheats.remove(i); persistCheats(); renderCheatList(); });
-    row.appendChild(code); row.appendChild(toggle); row.appendChild(del);
+    top.appendChild(toggle); top.appendChild(del);
+    row.appendChild(top);
+    if (describe) {
+      const desc = document.createElement('div');
+      desc.className = 'cheat-desc';
+      desc.textContent = describe(c);
+      row.appendChild(desc);
+    }
     list.appendChild(row);
   }
   if (!cheats.length) {
@@ -919,6 +1136,10 @@ function addCheat() {
   if (res.error) { err.textContent = res.error; return; }
   err.textContent = '';
   inp.value = '';
+  // Show what the new code does immediately — catches wrong-game codes at
+  // paste time instead of after they've mangled a save.
+  const describe = window.PocketCheat && window.PocketCheat.describeCheat;
+  if (describe) setStatus(describe(res));
   persistCheats();
   renderCheatList();
 }
@@ -1204,9 +1425,10 @@ $('btn-debug').addEventListener('click', () => {
   const ov = $('ov-debug');
   const open = !ov.classList.contains('open');
   toggleOverlay('ov-debug');
-  if (open) debug.start(); else debug.stop();
+  if (open) { debug.start(); renderWatchList(); } else debug.stop();
 });
 $('debug-close').addEventListener('click', () => { toggleOverlay('ov-debug'); debug.stop(); });
+$('debug-resume').addEventListener('click', () => { dbgRunning = false; setPaused(false); setStatus('resumed'); });
 
 // screenshot: canvas → PNG data URL → save dialog in main.
 // Every shot is also filed into the per-game gallery (shotsDir) and can be
