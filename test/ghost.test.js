@@ -155,3 +155,39 @@ test('hold stops the race but keeps the movie armed for the next reset', () => {
   assert.ok(racer.active, 'second attempt starts fresh');
   assert.strictEqual(racer.progress, 0);
 });
+
+// ---- input echo trainer ----
+test('input echo: divergence tracking and echo mask', () => {
+  const me = new FakeGB(9);
+  const rec = new MovieRecorder();
+  rec.start(me);
+  rec.observe(0b00000001); // frame 0: A
+  rec.observe(0b00000010); // frame 1: B
+  rec.observe(0b00000100); // frame 2: select
+  const bytes = rec.stop();
+  const racer = new GhostRacer(me, FakeGB);
+  const err = racer.load(bytes);
+  assert.equal(err, null);
+  assert.equal(racer.startNow(), null);
+  // ghost's next input before any step
+  assert.equal(racer.echoMask, 0b00000001);
+  assert.equal(racer.divergedFromRecording, false);
+  // player matches on frame 0 (A pressed = bit 0)
+  let fb = racer.step(0b00000001);
+  assert.ok(fb, 'racing');
+  assert.equal(racer.divergedFromRecording, false);
+  // frame 1: player presses nothing while the ghost pressed B → diverged
+  racer.step(0b00000000);
+  assert.equal(racer.divergedFromRecording, true);
+  assert.equal(racer.divergenceFrame, 1);
+  // echo mask keeps following the recording regardless of divergence
+  assert.equal(racer.echoMask, 0b00000100);
+  // hold (attempt over) clears divergence for the next race
+  racer.hold();
+  assert.equal(racer.divergedFromRecording, false);
+  assert.equal(racer.echoMask, null, 'armed ghost exposes no echo');
+  // restart: divergence cleared
+  assert.equal(racer.startNow(), null);
+  assert.equal(racer.divergedFromRecording, false);
+  assert.equal(racer.echoMask, 0b00000001);
+});
