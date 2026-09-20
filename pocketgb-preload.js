@@ -34,7 +34,7 @@ contextBridge.exposeInMainWorld('pocketgb', {
   openShaderPack: () => ipcRenderer.invoke('open-shader-pack'),
   readShaderPack: (path) => ipcRenderer.invoke('read-shader-pack', path),
   onShaderPackChanged: (cb) => ipcRenderer.on('shader-pack-changed', (e, p) => cb(p)),
-  linkHost: (port) => ipcRenderer.invoke('link-host', port),
+  linkHost: (port, lan) => ipcRenderer.invoke('link-host', port, !!lan),
   linkJoin: (port, host) => ipcRenderer.invoke('link-join', port, host),
   linkStop: () => ipcRenderer.invoke('link-stop'),
   linkSend: (b) => ipcRenderer.send('link-send', b),
@@ -44,4 +44,10 @@ contextBridge.exposeInMainWorld('pocketgb', {
   onLinkError: (cb) => ipcRenderer.on('link-error', (e, msg) => cb(msg)),
   onUpdateStatus: (cb) => ipcRenderer.on('update-status', (e, text) => cb(text)),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  // RetroAchievements
+  raLogin: (username, apiKey) => ipcRenderer.invoke('ra-login', username, apiKey),
+  raLogout: () => ipcRenderer.invoke('ra-logout'),
+  raSession: (romB64) => ipcRenderer.invoke('ra-session', romB64),
+  raAward: (achId, hardcore, gameHash) => ipcRenderer.invoke('ra-award', achId, hardcore, gameHash),
+  raWhoami: () => ipcRenderer.invoke('ra-whoami'),
 });
