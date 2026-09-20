@@ -211,5 +211,47 @@ function gsFreezeCode(addr, value) {
     (addr & 0xFF).toString(16).padStart(2, '0') + ((addr >> 8) & 0xFF).toString(16).padStart(2, '0')).toUpperCase();
 }
 
-if (typeof module !== 'undefined') module.exports = { CheatEngine, parseGameShark, parseGameGenie, CheatFinder, gsFreezeCode };
-if (typeof window !== 'undefined') window.PocketCheat = { CheatEngine, parseGameShark, parseGameGenie, CheatFinder, gsFreezeCode };
+// Describe what a cheat does, in plain language. Pure function of the parsed
+// code: what memory region it touches, whether it continuously overwrites RAM
+// (GameShark) or patches ROM (Game Genie), and what a write of that value at
+// that address plausibly means. The UI shows this under every code so a typo
+// (or a code from the wrong game) is visible before it mangles a save.
+function describeCheat(entry) {
+  const region = (a) => {
+    if (a < 0x8000) return 'ROM (Game Genie patch)';
+    if (a < 0xA000) return 'VRAM (graphics)';
+    if (a < 0xC000) return 'cartridge RAM (S-RAM)';
+    if (a < 0xFE00) return 'work RAM';
+    if (a < 0xFEA0) return 'OAM (sprite table)';
+    if (a < 0xFF00) return 'unusable memory';
+    if (a < 0xFF80) return 'hardware I/O';
+    if (a < 0xFFFF) return 'high RAM';
+    return 'interrupt enable';
+  };
+  const hx = (v, w) => v.toString(16).toUpperCase().padStart(w, '0');
+  const what = [];
+  if (entry.kind === 'gs') {
+    const a = entry.addr, v = entry.value;
+    what.push(`writes ${hx(v, 2)} (${v}) to ${region(a)} at $${hx(a, 4)} every frame`);
+    if (v === 0x00) what.push('pins the value to zero');
+    else if (v === 0x01) what.push('forces a value of 1 (often a counter/flag)');
+    else if (v === 0x09) what.push('forces 9 (classic infinite-lives-style freeze)');
+    else if (v === 0x63) what.push('forces 99 (classic max-count freeze)');
+    else if (v === 0xFF) what.push('pins the value to 255/0xFF (often max, sometimes a mask)');
+    if (a >= 0xC000 && a < 0xFE00 && v >= 0x30 && v <= 0x39) what.push('ASCII digit — may set a name/score character');
+    if (a >= 0xFF00 && a < 0xFF80) what.push('⚠ I/O register: may fight the hardware itself');
+    return what.join('; ');
+  }
+  // Game Genie: ROM patch — value replaces the byte at addr when compare matches.
+  const v = entry.value, a = entry.addr;
+  what.push(`replaces the ROM byte at $${hx(a, 4)} with ${hx(v, 2)}`);
+  what.push(entry.compare !== null
+    ? `only when the original byte is ${hx(entry.compare, 2)} (checked on every read)`
+    : 'unconditionally (no compare) — affects every bank mapped there');
+  if (a < 0x0100) what.push('⚠ inside the boot-ROM vector area — likely breaks startup');
+  if (a >= 0x0048 && a <= 0x004F) what.push('⚠ interrupt vector region');
+  return what.join('; ');
+}
+
+if (typeof module !== 'undefined') module.exports = { CheatEngine, parseGameShark, parseGameGenie, CheatFinder, gsFreezeCode, describeCheat };
+if (typeof window !== 'undefined') window.PocketCheat = { CheatEngine, parseGameShark, parseGameGenie, CheatFinder, gsFreezeCode, describeCheat };

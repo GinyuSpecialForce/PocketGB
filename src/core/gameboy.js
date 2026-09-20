@@ -10,6 +10,7 @@ const _MMU    = (typeof MMU    !== 'undefined') ? MMU    : require('./mmu').MMU;
 const _Timer  = (typeof Timer  !== 'undefined') ? Timer  : require('./timer').Timer;
 const _Joypad = (typeof Joypad !== 'undefined') ? Joypad : require('./joypad').Joypad;
 const _Cartridge = (typeof Cartridge !== 'undefined') ? Cartridge : require('./cartridge').Cartridge;
+const _BreakpointManager = (typeof BreakpointManager !== 'undefined') ? BreakpointManager : require('./debugger').BreakpointManager;
 const _CheatEngine = (typeof CheatEngine !== 'undefined') ? CheatEngine : require('./cheats').CheatEngine;
 const _Serial = (typeof Serial !== 'undefined') ? Serial : require('./serial').Serial;
 
@@ -17,6 +18,7 @@ class GameBoy {
   constructor() {
     this.cart = null;
     this.cheats = new _CheatEngine();
+    this._bpMgr = new _BreakpointManager(); // debugger watchpoints (bound to each MMU at loadROM)
     this.serial = new _Serial();
     this.serial.requestInterrupt = (b) => this.requestInterrupt(b);
     this.ppu = new _PPU({ requestInterrupt: (b) => this.requestInterrupt(b), readByte: () => 0xFF });
@@ -72,6 +74,10 @@ class GameBoy {
     }
     this.cpu.mmu = this.mmu;
     this.ppu.mmu = this.mmu; // HDMA source reads
+    // Debugger: the MMU consults the BreakpointManager on every read/write
+    // (cost: one null check when no watchpoints are armed). Survives PPU/MMU
+    // swaps across DMG↔CGB loads — the app sets this once.
+    this.mmu.breakpoints = this._bpMgr || (this._bpMgr = new _BreakpointManager());
     this.resetComponents();
     // resetComponents() builds a fresh Joypad (its select bits are part of the
     // reset state) — re-link the SGB transport that loadROM attached above.
@@ -211,12 +217,17 @@ class GameBoy {
   // framebuffer when a new frame completes: Uint8Array of 160*144 shade
   // indices on DMG, Uint32Array of BGR555 colors on CGB.
   // ---- debugger hooks ----
-  // breakpoints: Set of addresses checked before each CPU step. stepFrames()
-  // runs instructions (with breakpoints honored) while video keeps rendering.
+  // Execution breakpoints: Set of addresses checked before each CPU step.
   get breakpoints() { return this._breakpoints || (this._breakpoints = new Set()); }
   addBreakpoint(addr) { this.breakpoints.add(addr & 0xFFFF); }
   removeBreakpoint(addr) { this.breakpoints.delete(addr & 0xFFFF); }
   clearBreakpoints() { if (this._breakpoints) this._breakpoints.clear(); }
+  // Memory watchpoints (r/w/access) via the BreakpointManager on the MMU.
+  get watchpoints() { return this._bpMgr; }
+  watchRead(addr) { this._bpMgr.watchRead(addr); }
+  watchWrite(addr) { this._bpMgr.watchWrite(addr); }
+  watchAccess(addr) { this._bpMgr.watchAccess(addr); }
+  clearWatchpoints() { this._bpMgr.clear(); }
 
   stepInstruction() {
     // one CPU step with full component ticking (slower than runFrame's loop
@@ -239,10 +250,18 @@ class GameBoy {
     // components see half as many of their base-rate ticks (tickParts halves).
     let budget = 70224;
     const bps = this._breakpoints;
+    const bp = this._bpMgr; // watchpoints: armed check is 3 loads, no call
+    this._watchFired = false;
     while (budget > 0) {
+      if (bp && bp.armed && bp.enabled) { this.cpu._watchHit = false; }
       if (bps && bps.has(this.cpu.pc)) break; // debugger: halt at the breakpoint
       // cpu.step handles HALT and STOP internally (cheap wait path + interrupt wake).
       let cycles = cpuStep();
+      if (bp && bp.armed && bp.enabled && this.cpu._watchHit) { // debugger: watchpoint fired
+        this.cpu._watchHit = false;
+        this._watchFired = true;
+        break;
+      }
       const master = this.cpu.doubleSpeed ? Math.max(1, cycles >> 1) : cycles;
       if (master > budget) { cycles = budget << (this.cpu.doubleSpeed ? 1 : 0); }
       tickParts(cycles);

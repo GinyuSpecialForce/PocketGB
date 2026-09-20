@@ -37,6 +37,8 @@ class GhostRacer {
     this.paused = false;     // frozen with the game (pause / rewind)
     this.done = false;       // ghost reached the end of its recording
     this.romId = null;
+    this.diverged = false; // input echo: you left the recorded path
+    this.nextEcho = null;  // input echo: mask the ghost will play next frame
   }
 
   // bytes: a .pgm movie file. ARMS the ghost — it does not move until
@@ -91,6 +93,10 @@ class GhostRacer {
       this.armed = false;
       this.paused = false;
       this.done = false;
+      // Input echo (Input Echo Trainer): reset divergence tracking. The echo
+      // strip renders frames[this.pos] — the input the ghost will play NOW.
+      this.diverged = false;
+      this.lastEcho = null;
       return null;
     } catch (e) {
       this.active = false;
@@ -104,7 +110,7 @@ class GhostRacer {
   // One emulated frame. mainMask: the LIVE player's input this frame (that is
   // what you race with). The ghost plays its own recorded input. Returns the
   // ghost framebuffer (PiP-ready) or null when not racing / frozen / finished.
-  step(mainMask) { // eslint-disable-line no-unused-vars — mainMask documents intent; ghost ignores live input
+  step(mainMask) {
     if (!this.active || !this.gb) return null;
     if (this.paused) return null;
     if (this.pos >= this.frames.length) {
@@ -112,10 +118,33 @@ class GhostRacer {
       this.done = true;
       return null;
     }
+    // Input Echo Trainer bookkeeping, BEFORE consuming the frame:
+    //   nextEcho — the input the ghost is about to play (for the glyph strip)
+    //   diverged — you pressed something the recording didn't (or missed
+    //              something it did) at the same frame. "≠ pressed" means the
+    //              timelines are no longer comparable from here.
+    this.nextEcho = this.frames[this.pos];
+    if (mainMask !== undefined && mainMask !== null) {
+      if ((mainMask & 0xFF) !== this.nextEcho) {
+        if (!this.diverged) this._divergeAt = this.pos; // first frame off the path
+        this.diverged = true;
+      }
+    }
     const mask = this.frames[this.pos++];
     this.gb.joypad.setState(window.PocketMovie.maskToState(mask));
     return this.gb.runFrame();
   }
+
+  // Input Echo Trainer accessors.
+  // Mask the ghost will play on the NEXT step() (or null when idle/done).
+  get echoMask() {
+    if (!this.active || this.paused || this.done) return null;
+    return this.pos < this.frames.length ? this.frames[this.pos] : null;
+  }
+  // True from the first mismatched frame onward until the race restarts.
+  get divergedFromRecording() { return !!this.diverged; }
+  // First frame index where you left the recorded path (or null if not).
+  get divergenceFrame() { return this.diverged ? this._divergeAt : null; }
 
   // Freeze/unfreeze with the game (pause button, rewind hold).
   pause() { if (this.active) this.paused = true; }
@@ -128,6 +157,9 @@ class GhostRacer {
     this.paused = false;
     this.pos = 0;
     this.done = false;
+    this.diverged = false;
+    this.nextEcho = null;
+    this._divergeAt = null;
   }
 
   // Full teardown (unloads the movie).
@@ -140,6 +172,10 @@ class GhostRacer {
     this.anchorState = null;
     this.pos = 0;
     this.done = false;
+    this.diverged = false;
+    this.nextEcho = null;
+    this.lastEcho = null;
+    this._divergeAt = null;
   }
 
   get progress() { return this.frames && this.frames.length ? this.pos / this.frames.length : 0; }

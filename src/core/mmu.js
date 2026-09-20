@@ -26,10 +26,15 @@ class MMU {
 
     this.ie = 0x00; // IE (FFFF)
     this.if = 0xE1; // IF (FF0F) — post-boot value
+    // Debugger watchpoints (set by GameBoy.loadROM / app): BreakpointManager
+    // with check(addr, kind, pc) — consulted only when armed.
+    this.breakpoints = null;
   }
 
   read(a) {
     a &= 0xFFFF;
+    const bp = this.breakpoints;
+    if (bp && bp.armed && bp.enabled && bp.check(a, 'r', this.cpu.pc)) this.cpu._watchHit = true;
     // Boot ROM maps at 0000-00FF (DMG) or 0000-08FF (CGB) until FF50 unlocks it
     if (this.bootrom && !this.bootromDisabled && a < (this.cgb ? 0x900 : 0x100)) return this.bootrom[a];
     if (a < 0x8000) return this.cart.readRom(a);
@@ -46,6 +51,8 @@ class MMU {
 
   write(a, v) {
     a &= 0xFFFF; v &= 0xFF;
+    const bp = this.breakpoints;
+    if (bp && bp.armed && bp.enabled && bp.check(a, 'w', this.cpu.pc)) this.cpu._watchHit = true;
     if (a < 0x8000) { this.cart.handleBankWrite(a, v); return; }
     if (a < 0xA000) { this.ppu.writeVRAM(a, v); return; }
     if (a < 0xC000) { this.cart.writeRam(a, v); return; }

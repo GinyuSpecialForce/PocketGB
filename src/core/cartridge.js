@@ -1,6 +1,7 @@
 // PocketGB — cartridge parsing and memory bank controllers (MBC0/1/3/5 + RTC)
 'use strict';
 const _extractRomTitle = (typeof extractRomTitle !== 'undefined') ? extractRomTitle : require('./romtitle').extractRomTitle;
+const _Mbc7 = (typeof Mbc7 !== 'undefined') ? Mbc7 : (typeof require === 'function' ? require('./mbc7').Mbc7 : null);
 
 class Cartridge {
   constructor(rom) {
@@ -9,6 +10,9 @@ class Cartridge {
     for (let i = 0; i < rom.length; i += 0x4000) this.romBanks.push(rom.subarray(i, Math.min(i + 0x4000, rom.length)));
     this.parseHeader();
     this.ram = new Uint8Array(this.ramSize);
+    // MBC7 EEPROM (93LC56) emulates blank-chip state: erased cells read 0xFF
+    // until written (a fresh save then round-trips correctly).
+    if (this.rom[0x147] === 0x20) this.ram.fill(0xFF);
     this.ramEnabled = false;
     this.battery = this.hasBattery;
     this.dirty = false;
@@ -79,6 +83,10 @@ class Cartridge {
     this.onRumble = null; // set by the UI layer → gamepad vibrationActuator
 
     this.title = _extractRomTitle(r);
+    // MBC7 (0x20): accelerometer cartridge (Kirby Tilt'n'Tumble). The Mbc7
+    // module owns A000-BFFF (register file + EEPROM); auto-attached when the
+    // module is loadable so Node tests without it still work (mbc7 = null).
+    this.mbc7 = (cartType === 0x20 && _Mbc7) ? new _Mbc7(this) : null;
     // Game Boy Camera (Pocket Camera) uses HuC-1; the title is the practical
     // detector since cart-type codes don't distinguish it reliably.
     this.hasCamera = /GAME\s*CAMERA|POCKET\s*CAMERA/i.test(this.title);
@@ -163,6 +171,7 @@ class Cartridge {
 
   // ---- banking ----
   handleBankWrite(a, v) {
+    if (this.mbc7 && this.mbc === 5) { this.mbc7.handleWrite(a, v); if (a < 0x2000 || (a >= 0x4000 && a < 0x6000)) return; }
     switch (this.mbc) {
       case 0: return;
       case 1: {
@@ -251,6 +260,8 @@ class Cartridge {
   }
 
   readRam(addr) {
+    // MBC7 register file (accelerometer + EEPROM) owns A000-BFFF entirely.
+    if (this.mbc7 && this.mbc === 5 && addr >= 0xA000 && addr < 0xC000) return this.mbc7.read(addr);
     if ((this.mbc === 3 || this.mbc === 30 || this.mbc === 'HUC3') && this.ramBank >= 0x08 && this.ramBank <= 0x0C) {
       if (!this.rtc.latched) { // live read
         this.latchRtc(1); // latch current values
@@ -277,6 +288,7 @@ class Cartridge {
   }
 
   writeRam(addr, v) {
+    if (this.mbc7 && this.mbc === 5 && addr >= 0xA000 && addr < 0xC000) { this.mbc7.write(addr, v); return; }
     if (this.mbc === 3 && this.ramBank >= 0x08 && this.ramBank <= 0x0C) { this.setRtcRegister(v); return; }
     if (!this.ramEnabled || this.ramSize === 0) return;
     if (this.mbc === 2) {
