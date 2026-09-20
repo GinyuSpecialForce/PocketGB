@@ -80,6 +80,22 @@
     }
     #ghost-status .sbutton { font-size: 10px; padding: 1px 6px; }
     #ghost-status.on { display: flex; }
+    /* input echo strip (ghost race trainer) */
+    #input-echo {
+      display: none; align-items: center; gap: 8px;
+      margin-top: 4px;
+    }
+    #input-echo.on { display: flex; }
+    #echo-canvas {
+      width: 480px; max-width: 100%; height: 30px;
+      image-rendering: pixelated; background: rgba(16, 12, 20, 0.6);
+      border-radius: 4px;
+    }
+    #echo-diverge {
+      display: none; font: 10px Hack, monospace; color: #ff8f6b;
+      white-space: nowrap;
+    }
+    #echo-diverge.on { display: inline; }
     #ghost-status #ghost-progress { color: #58e8c8; min-width: 30px; }
 
     main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -232,9 +248,15 @@
     .filmstrip .cover-star { position: absolute; top: 4px; right: 4px; font-size: 12px; }
     .filmstrip .empty { color: var(--text-dim); font-size: 12px; }
     .overlay .cheat {
-      display: flex; align-items: center; gap: 8px;
+      display: flex; flex-direction: column; gap: 2px;
       background: var(--bg); border-radius: var(--radius); padding: 7px 9px;
     }
+    .overlay .cheat .cheat-top { display: flex; align-items: center; gap: 8px; }
+    .overlay .cheat .cheat-desc {
+      color: var(--text-soft); font-size: 11px; line-height: 1.45;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .overlay .cheat.off .cheat-desc { opacity: 0.55; }
     .overlay .cheat .code { flex: 1; overflow: hidden; text-overflow: ellipsis; }
     .overlay .cheat.off .code { color: var(--text-soft); text-decoration: line-through; }
     .overlay .cheat button { background: none; border: 0; color: var(--text-soft); cursor: pointer; font: inherit; }
@@ -346,7 +368,11 @@
           <canvas id="ghost-screen" width="160" height="144"></canvas>
         </div>
       </div>
-      <div id="ghost-status">ghost: <span id="ghost-progress">armed</span> — reset (F8) starts the race together · <button class="sbutton" id="ghost-startnow">start now</button> · <button class="sbutton" id="ghost-cancel">cancel</button></div>
+      <div id="ghost-status">ghost: <span id="ghost-progress">armed</span> — reset (F8) starts the race together · <button class="sbutton" id="ghost-startnow">start now</button> · <button class="sbutton" id="ghost-cancel">cancel</button> · <button class="sbutton" id="ghost-echo">echo: off</button></div>
+      <div id="input-echo" title="the ghost's inputs, one column per button, scrolling right-to-left">
+        <canvas id="echo-canvas" width="480" height="30"></canvas>
+        <span id="echo-diverge">off the recorded path</span>
+      </div>
 
       <!-- cheats overlay -->
       <div class="overlay" id="ov-cheats">
@@ -361,7 +387,7 @@
           </div>
           <div class="err" id="cheat-err"></div>
           <div class="list" id="cheat-list"></div>
-          <div class="hint">GameShark codes edit RAM — 01 + value + address, e.g. 010238CD writes 02 to CD38. Game Genie codes patch ROM (XXXYYY or XXXYYYZZZ with compare).</div>
+          <div class="hint">GameShark codes edit RAM — 01 + value + address, e.g. 010238CD writes 02 to CD38. Game Genie codes patch ROM (XXXYYY or XXXYYYZZZ with compare). Each code shows what it does underneath.</div>
           <div class="actions2"><button class="sbutton" id="cheat-close">close</button></div>
         </div>
       </div>
@@ -439,9 +465,23 @@
             <button class="sbutton" id="bp-add">set</button>
             <button class="sbutton" id="bp-clear">clear all</button>
           </div>
+          <div class="kv">
+            <span class="k">watchpoint</span>
+            <input type="text" id="wp-input" placeholder="$C0A0 or C0A0" spellcheck="false" style="width: 90px;">
+            <select id="wp-kind" style="background: var(--bg); color: var(--text); border: 1px solid var(--bg-hover); border-radius: 4px; font: inherit; font-size: 11px;">
+              <option value="r">read</option>
+              <option value="w">write</option>
+              <option value="a">both</option>
+            </select>
+            <button class="sbutton" id="wp-add">watch</button>
+            <button class="sbutton" id="wp-clear">clear</button>
+          </div>
+          <div class="hint" id="wp-list" style="font-size: 11px;">no watchpoints</div>
           <div class="row">
             <button class="sbutton" id="dbg-step">step</button>
             <button class="sbutton" id="dbg-step8">step ×8</button>
+            <button class="sbutton" id="dbg-over">over</button>
+            <button class="sbutton" id="dbg-out">out</button>
             <button class="sbutton" id="dbg-run">run to bp</button>
           </div>
           <div class="kv"><span class="k" id="disasm-addr">disassembly</span>
@@ -456,7 +496,7 @@
           <div class="hint" id="heat-summary">no samples yet</div>
           <canvas id="heat-canvas" width="512" height="160" style="width: 512px; image-rendering: pixelated; background: #151317;"></canvas>
           <div class="hint">one sample per frame at the CPU's PC — bright = hot. bank rows are physical ROM banks; the leftmost gap is bank 0's fixed area.</div>
-          <div class="actions2"><button class="sbutton" id="debug-close">close</button></div>
+          <div class="actions2"><button class="sbutton" id="debug-close">close</button><button class="sbutton" id="debug-resume">resume</button></div>
         </div>
       </div>
 
@@ -645,6 +685,7 @@
         <div class="kv"><span class="k" style="cursor:pointer" id="back-hardware">‹ menu</span><h2>hardware</h2></div>
         <div class="more-grid">
           <button class="sbutton" id="btn-link">link cable</button>
+          <button class="sbutton" id="btn-ra">achievements</button>
           <button class="sbutton" id="btn-clock">game clock</button>
           <button class="sbutton" id="btn-printer">printer: off</button>
           <button class="sbutton" id="btn-bootrom">boot rom: off</button>
@@ -652,6 +693,26 @@
         <div class="actions2">
           <button class="sbutton" id="sub-hardware-back">back</button>
           <button class="sbutton" id="sub-hardware-close">close</button>
+        </div>
+      </div>
+
+      <!-- retroachievements panel (opens on top of the menu) -->
+      <div class="box hidden" id="ra-panel">
+        <div class="kv"><span class="k" style="cursor:pointer" id="ra-back">‹ menu</span><h2>retroachievements</h2></div>
+        <div class="hint">Race achievements from retroachievements.org against your own play. Achievements are evaluated live and posted to your account — hardcore mode: no save-state assists count.</div>
+        <div class="row">
+          <input type="text" id="ra-user" placeholder="username" spellcheck="false" autocomplete="off">
+        </div>
+        <div class="row">
+          <input type="text" id="ra-key" placeholder="web API key (retroachievements.org → control panel → keys)" spellcheck="false" autocomplete="off">
+        </div>
+        <div class="row">
+          <button class="sbutton" id="ra-login">log in</button>
+          <button class="sbutton" id="ra-logout">log out</button>
+        </div>
+        <div class="hint" id="ra-status">logged out</div>
+        <div class="actions2">
+          <button class="sbutton" id="ra-close">close</button>
         </div>
       </div>
 
@@ -664,6 +725,12 @@
         </div>
         <div class="row">
           <input type="text" id="link-addr" placeholder="opponent's IP for internet play (blank = localhost)" spellcheck="false">
+        </div>
+        <div class="row">
+          <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-soft);">
+            <input type="checkbox" id="link-lan" style="accent-color: var(--primary);">
+            open to network (allow the other computer on this Wi-Fi/LAN to join)
+          </label>
         </div>
         <div class="row">
           <button class="sbutton" id="link-host">host</button>
@@ -708,6 +775,9 @@
 <script src="src/core/cartridge.js"></script>
 <script src="src/core/cheats.js"></script>
 <script src="src/core/sgb.js"></script>
+<script src="src/core/debugger.js"></script>
+<script src="src/core/achievements.js"></script>
+<script src="src/core/mbc7.js"></script>
 <script src="src/core/heatmap.js"></script>
 <script src="src/core/serial.js"></script>
 <script src="src/core/gameboy.js"></script>
