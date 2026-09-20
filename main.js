@@ -3,10 +3,13 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const net = require('net');
 const { isPatchPath } = require('./src/core/patch');
 const { extractRomTitle, titleLooksBroken, basenameOf } = require('./src/core/romtitle');
 const updater = require('./src/main/updater');
+
+// Startup banner — this is the line you see when launching from a terminal.
+const pkg = require('./package.json');
+console.log(`PocketGB version ${pkg.version}`);
 
 let win = null;
 let currentRom = null; // { name, path, dir }
@@ -45,50 +48,26 @@ function writeSetting(key, value) {
 
 function send(ch, ...args) { if (win && !win.isDestroyed()) win.webContents.send(ch, ...args); }
 
-// ---- link cable (localhost TCP bridge between two PocketGB instances) ----
-let linkServer = null; // net.Server while hosting
-let linkSock = null;   // net.Socket while connected
-
-function linkStatus() {
-  return { hosting: !!linkServer, connected: !!(linkSock && !linkSock.destroyed) };
+// ---- link cable (netplay: TCP bridge between two PocketGB instances) ----
+// Extracted into src/core/netlink.js so it's unit-testable; the LAN option
+// (bind 0.0.0.0) makes real two-machine play possible — the old code only
+// ever bound loopback, so two computers could never connect.
+const { NetLink } = require('./src/core/netlink');
+let link = null;
+function getLink() {
+  if (!link) {
+    link = new NetLink({
+      onStatus: (st) => {
+        send('link-status', st);
+        // keep the renderer's separate 'hosting port' channel fed (UI text)
+        send('link-hosting', st.hosting ? (st.port || 0) : 0);
+      },
+      onError: (msg) => send('link-error', msg),
+    });
+  }
+  return link;
 }
-
-function startLinkServer(port) {
-  stopLink();
-  linkServer = net.createServer((sock) => {
-    if (linkSock && !linkSock.destroyed) { sock.destroy(); return; } // single-peer link
-    linkSock = sock;
-    sock.on('data', (buf) => send('link-data', new Uint8Array(buf)));
-    sock.on('close', () => { if (linkSock === sock) { linkSock = null; send('link-status', linkStatus()); } });
-    sock.on('error', () => {}); // close handles cleanup
-    send('link-status', linkStatus());
-  });
-  linkServer.on('error', (err) => {
-    send('link-error', String((err && err.message) || err));
-    linkServer = null;
-    send('link-status', linkStatus());
-  });
-  linkServer.listen(port || 0, '127.0.0.1', () => {
-    send('link-hosting', linkServer.address().port); // share this port with the peer
-  });
-}
-
-function joinLink(port, host) {
-  stopLink();
-  const target = (typeof host === 'string' && host.length) ? host : '127.0.0.1';
-  const sock = net.connect(port || 8765, target);
-  linkSock = sock;
-  sock.on('connect', () => send('link-status', linkStatus()));
-  sock.on('data', (buf) => send('link-data', new Uint8Array(buf)));
-  sock.on('close', () => { if (linkSock === sock) { linkSock = null; send('link-status', linkStatus()); } });
-  sock.on('error', (err) => { send('link-error', String((err && err.message) || err)); });
-}
-
-function stopLink() {
-  if (linkSock) { linkSock.destroy(); linkSock = null; }
-  if (linkServer) { linkServer.close(); linkServer = null; }
-}
-
+function linkStatus() { return link ? link.status : { hosting: false, connected: false, port: null }; }
 function romKey(romPath) {
   return Buffer.from(romPath.toLowerCase()).toString('base64url');
 }
@@ -506,13 +485,57 @@ app.whenReady().then(() => {
     } catch { return []; }
   });
 
-  // link cable
-  ipcMain.handle('link-host', (e, port) => { startLinkServer(Number(port) || 0); return linkStatus(); });
-  ipcMain.handle('link-join', (e, port, host) => { joinLink(Number(port) || 8765, host); return linkStatus(); });
-  ipcMain.handle('link-stop', () => { stopLink(); return linkStatus(); });
-  ipcMain.on('link-send', (e, b) => {
-    if (linkSock && !linkSock.destroyed) linkSock.write(Buffer.from([b & 0xFF]));
+  // link cable (netplay)
+  ipcMain.handle('link-host', async (e, port, lan) => {
+    try { const p = await getLink().host(Number(port) || 0, { lan: !!lan }); return { ...linkStatus(), port: p }; }
+    catch (err) { return { ...linkStatus(), error: String((err && err.message) || err) }; }
   });
+  ipcMain.handle('link-join', async (e, port, host) => {
+    try { await getLink().join(Number(port) || 8765, host); return linkStatus(); }
+    catch (err) { return { ...linkStatus(), error: String((err && err.message) || err) }; }
+  });
+  ipcMain.handle('link-stop', () => { if (link) link.stop(); return linkStatus(); });
+  ipcMain.on('link-send', (e, b) => { if (link) link.send(b); });
+
+  // ---- RetroAchievements (network lives here: the COEP-locked renderer
+  // can only fetch same-origin app:// URLs) ----
+  const { RAClient } = require('./src/core/achievements');
+  let raClient = null;
+  ipcMain.handle('ra-login', async (e, username, apiKey) => {
+    try {
+      raClient = new RAClient({ username: String(username || ''), token: String(apiKey || '') });
+      const res = await raClient.login();
+      writeSetting('ra.user', res.user);
+      return { ok: true, user: res.user, score: res.score, softcore: res.softcore };
+    } catch (err) {
+      raClient = null;
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+  ipcMain.handle('ra-logout', () => { raClient = null; writeSetting('ra.user', null); return { ok: true }; });
+  ipcMain.handle('ra-session', async (e, romB64) => {
+    // Identify the loaded ROM and hand the renderer the compiled set.
+    try {
+      if (!raClient) return { ok: false, error: 'not logged in' };
+      const rom = Buffer.from(String(romB64 || ''), 'base64');
+      const { raHash } = require('./src/core/achievements');
+      const hash = raHash(rom);
+      const game = await raClient.fetchGame(hash);
+      return { ok: true, hash, game };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+  ipcMain.handle('ra-award', async (e, achId, hardcore, gameHash) => {
+    try {
+      if (!raClient) return { ok: false, error: 'not logged in' };
+      const res = await raClient.award(achId, { hardcore: !!hardcore, gameHash });
+      return { ok: !!res.success, error: res.error };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+  ipcMain.handle('ra-whoami', () => ({ user: readSettings()['ra.user'] || null }));
 
   buildMenu();
   createWindow();
@@ -528,6 +551,6 @@ app.on('window-all-closed', () => { app.quit(); });
 
 app.on('before-quit', () => {
   updater.stop();
-  stopLink();
+  if (link) link.dispose();
   send('app-quitting');
 });
