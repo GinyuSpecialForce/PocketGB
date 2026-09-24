@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' blob:; img-src 'self' data:">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' blob: 'wasm-unsafe-eval'; img-src 'self' data:">
   <title>PocketGB</title>
   <style>
     /* Impactor (PlumeImpactor) design language, pastel purple edition. */
@@ -379,7 +379,7 @@
         <div class="box">
           <h2>cheats</h2>
           <div class="row">
-            <input type="text" id="cheat-input" placeholder="010238CD or 068-5FF-E66" spellcheck="false">
+            <input type="text" id="cheat-input" placeholder="010238CD, 068-5FF-E66, or GBA: XXXXXXXX XXXXXXXX" spellcheck="false">
           </div>
           <div class="row">
             <button class="sbutton" id="cheat-add">add</button>
@@ -387,7 +387,7 @@
           </div>
           <div class="err" id="cheat-err"></div>
           <div class="list" id="cheat-list"></div>
-          <div class="hint">GameShark codes edit RAM — 01 + value + address, e.g. 010238CD writes 02 to CD38. Game Genie codes patch ROM (XXXYYY or XXXYYYZZZ with compare). Each code shows what it does underneath.</div>
+          <div class="hint">GB/CGB: GameShark codes edit RAM — 01 + value + address, e.g. 010238CD writes 02 to CD38. Game Genie codes patch ROM (XXXYYY or XXXYYYZZZ with compare). GBA: GameShark/Pro Action Replay (XXXXXXXX XXXXXXXX), CodeBreaker (XXXXXXXX XXXX), or VBA raw writes (XXXXXXXX:YY) — applied by mGBA. Each code shows what it does underneath.</div>
           <div class="actions2"><button class="sbutton" id="cheat-close">close</button></div>
         </div>
       </div>
@@ -780,6 +780,11 @@
 <script src="src/core/mbc7.js"></script>
 <script src="src/core/heatmap.js"></script>
 <script src="src/core/serial.js"></script>
+<script src="src/core/gba-header.js"></script>
+<!-- mGBA wasm core (ES module) → window.mGBA for the machine adapter.
+     External file: inline scripts are blocked by the app CSP. -->
+<script type="module" src="src/core/mgba-loader.js"></script>
+<script src="src/core/gba-mgba.js"></script>
 <script src="src/core/gameboy.js"></script>
 <script src="app.js"></script>
 </body>
