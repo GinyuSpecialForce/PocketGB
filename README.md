@@ -2,14 +2,14 @@
 
 # 🎮 PocketGB
 
-**A Game Boy Color / Game Boy (DMG) emulator for macOS — built with Electron**
+**A Game Boy, Game Boy Color, and Game Boy Advance emulator for macOS — built with Electron**
 
-CPU, PPU, and CGB written from scratch in plain JavaScript. No emulation libraries.
-Validated against industry-standard hardware test suites.
+GB/GBC CPU, PPU, and CGB written from scratch in plain JavaScript — no emulation
+libraries. GBA games run on the vendored mGBA WebAssembly core.
 
 ![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-macOS-black?logo=apple&logoColor=white)
-![Tests](https://img.shields.io/badge/project_tests-189_passing-brightgreen)
+![Tests](https://img.shields.io/badge/project_tests-198_passing-brightgreen)
 ![dmg-acid2](https://img.shields.io/badge/dmg_acid2-pixel_perfect-success)
 ![cgb-acid2](https://img.shields.io/badge/cgb_acid2-pixel_perfect-success)
 
@@ -28,7 +28,7 @@ npm install
 npm start
 ```
 
-Drop a `.gb` or `.gbc` ROM onto the window, or use **File → Open ROM…** (<kbd>⌘O</kbd>). Color games automatically run in full Game Boy Color mode.
+Drop a `.gb`, `.gbc`, or `.gba` ROM onto the window, or use **File → Open ROM…** (<kbd>⌘O</kbd>). Color games automatically run in full Game Boy Color mode; `.gba` ROMs boot through the bundled mGBA core with no GBA BIOS required.
 
 ---
 
@@ -40,11 +40,11 @@ Drop a `.gb` or `.gbc` ROM onto the window, or use **File → Open ROM…** (<kb
 | [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) (PPU, Color) | **Pixel-perfect** — 0 / 23,040 pixel mismatches vs. real Game Boy Color hardware |
 | [Blargg `cpu_instrs`](https://github.com/retrio/gb-test-roms) (CPU) | **11 / 11** individual tests pass, plus `02-interrupts` |
 | [Blargg `instr_timing` / `mem_timing`](https://github.com/retrio/gb-test-roms) | included and run; known-failing on bus-timing subtleties (documented, reported as skips) |
-| Project test suite | 189 tests (CPU ops & flags, MBC banking incl. MBC1M/MBC30/HuC/MBC7 EEPROM, timer quirks, PPU rendering, CGB memory/palette/DMA/speed, save states, GIF encoders, cheat engine + finder + code descriptions, patch decoders, movie replay, ghost racer + input echo, SGB packets/palettes/borders, cartridge heatmap, RetroAchievements parser/evaluator, netplay transport, debugger watchpoints, ROM-title extraction, smoke ROM) |
+| Game Boy Advance | Handled by the vendored [mGBA](https://mgba.io) wasm core (MPL-2.0) — the from-scratch GB/CGB core above is untouched |
+| Project test suite | 198 tests (CPU ops & flags, MBC banking incl. MBC1M/MBC30/HuC/MBC7 EEPROM, timer quirks, PPU rendering, CGB memory/palette/DMA/speed, save states, GIF encoders, cheat engine + finder + code descriptions, patch decoders, movie replay, ghost racer + input echo, SGB packets/palettes/borders, cartridge heatmap, RetroAchievements parser/evaluator, netplay transport, debugger watchpoints, ROM-title extraction, smoke ROM, mGBA adapter + cheat-file protocol, GBA cheat formats, GBA movie identity) |
 
 <details>
 <summary>How the PPU stays accurate</summary>
-
 The PPU is a dot-driven renderer ported from mGBA's software renderer: pixels are
 pushed per-dot with register sampling, so mid-scanline writes to `LCDC`, `SCX`,
 `WX`, and `WY` land exactly where hardware puts them. The STAT interrupt is
@@ -61,15 +61,16 @@ its 4-cycle window, TIMA write cancellation, and DIV/TAC write edge effects.
 ## Features
 
 - **Emulation** — SM83 CPU (full base + CB instruction sets, HALT bug, interrupts), DMG PPU, 4-channel APU (2 pulse, wave, noise) with frame sequencer, hardware-accurate DIV/TIMA timer, OAM DMA with startup delay, MBC1 (+MBC1M multicarts) / MBC3 (+ RTC) / MBC30 / MBC5 / HuC1 / HuC3 and ROM-only cartridges
+- **Game Boy Advance** — drop any `.gba` ROM: it boots on the vendored mGBA WebAssembly core (HLE boot, no BIOS file) and renders through the same display pipeline (integer scaling, LCD effects/shaders, capture). Cheats, save states, rewind, fast-forward, battery saves, screenshots/GIF/WebM, and movies all work — the GB-specific extras below say so when they don't apply
 - **Game Boy Color** — full CGB mode: 32 KB banked WRAM, 16 KB banked VRAM with tile/map attributes, 8 BG + 8 OBJ palettes (32K colors), HDMA/GDMA transfers, double-speed mode (<kbd>STOP</kbd> + <kbd>KEY1</kbd>), BGR555 color output, and DMG-compatibility register behavior
 - **Boot ROMs & generated intro** — optionally load original boot ROM dumps for the authentic logo drop, boot chime, and CGB color intro; without a dump, a generated intro plays the same falling-logo animation with chime and CGB color sweep, straight from the cartridge's own boot data
 - **Auto-updates** — dual-mode: installed builds use electron-updater against GitHub releases; **git clones self-update** (periodic + Help ▸ Check for Updates…) via `git fetch` + fast-forward-only merge — local commits are never discarded, and `npm install` runs automatically when dependencies change
-- **Persistence** — battery saves (`.sav`), MBC3 RTC storage, and 10 save-state slots per game (<kbd>⌘1</kbd>–<kbd>⌘0</kbd> to load, <kbd>⌘⇧1</kbd>–<kbd>⌘⇧0</kbd> to save), auto-flushed every few seconds and on quit
+- **Persistence** — battery saves (`.sav`), MBC3 RTC storage, and 10 save-state slots per game (<kbd>⌘1</kbd>–<kbd>⌘0</kbd> to load, <kbd>⌘⇧1</kbd>–<kbd>⌘⇧0</kbd> to save), auto-flushed every few seconds and on quit — for GBA games too, via mGBA's own state format
 - **Display** — integer-scaled canvas, full color for CGB games; three palettes (DMG Green, Pocket Gray, Ember) for DMG games, selectable in-app and persisted
 - **Audio** — Web Audio output matched to your device's real sample rate (no crackle from rate mismatch)
-- **Gamepad support** — Gamepad API, standard mapping, merged with keyboard input (MBC rumble hook ready for `vibrationActuator`)
+- **Gamepad support** — Gamepad API, standard mapping, merged with keyboard input, including the GBA shoulder buttons (MBC rumble hook ready for `vibrationActuator`)
 - **Fast-forward & rewind** — hold <kbd>Tab</kbd> to fast-forward, <kbd>Backspace</kbd> to rewind (rolling save-state buffer)
-- **Cheats** — GameShark (Pan Docs layout: `01` + value + little-endian address, e.g. `010238CD`) and Game Genie (`XXXYYY[ZZZ]`), per-game persisted, with per-code toggles, deletion, and text-field-safe typing. Every code shows a plain-language description of what it does ("writes 09 to work RAM at $D134 every frame" / "replaces the ROM byte at $085F with 06 only when the original is 03") — wrong-game codes and typos are visible at a glance
+- **Cheats** — GameShark (Pan Docs layout: `01` + value + little-endian address, e.g. `010238CD`) and Game Genie (`XXXYYY[ZZZ]`), per-game persisted, with per-code toggles, deletion, and text-field-safe typing. On GBA the same UI accepts GameShark/Pro Action Replay (`XXXXXXXX XXXXXXXX`), CodeBreaker (`XXXXXXXX XXXX`), and VBA (`XXXXXXXX:YY`) codes — applied by mGBA live (the current frame is carried across) and persisted per game. Every code shows a plain-language description of what it does ("writes 09 to work RAM at $D134 every frame" / "replaces the ROM byte at $085F with 06 only when the original is 03") — wrong-game codes and typos are visible at a glance
 - **LCD effects & shader packs** — LCD ghosting, scanlines, a WebGL shader (subpixel LCD grid + optional screen curvature), plus loadable `.pbg-fx` shader packs: JSON + GLSL with validated uniforms, per-game persistence, and hot-reload when you edit the file
 - **ROM library** — home screen with recent ROMs, one click to relaunch; cards show cover art (your chosen screenshot, else the newest save-state thumbnail); delete a game's saves or remove it from the library with two-step confirmation
 - **Screenshot history** — every screenshot is filed into a per-game gallery (newest 100 kept), browsable as a filmstrip, with per-shot delete and one-click *set as cover art*
@@ -77,19 +78,19 @@ its 4-cycle window, TIMA write cancellation, and DIV/TAC write edge effects.
 - **Remappable input** — keyboard bindings with a press-to-rebind editor
 - **Per-game settings** — palette, scale, and cheats remembered per ROM
 - **Capture** — PNG screenshots on both DMG and CGB; animated GIF capture on both (4-color for DMG, full 256-color palette with median-cut quantization for CGB); WebM video recording (canvas + game audio) via MediaRecorder
-- **Debug overlay** — CPU/PPU registers, next-instruction hint, VRAM tile viewer, breakpoints, **watchpoints** (break when the game reads/writes any memory address, with the touching PC reported), step / step×8 / **step over** / **step out** / run-to-breakpoint, and a live disassembly listing
-- **Link cable & netplay** — host on a port or join any IP for Pokémon trades and other serial-exchange games; hosts bind loopback by default (two windows on one machine) or tick **open to network** to accept a friend joining over LAN/Wi-Fi (or port-forward for internet play)
+- **Debug overlay** (GB/CGB) — CPU/PPU registers, next-instruction hint, VRAM tile viewer, breakpoints, **watchpoints** (break when the game reads/writes any memory address, with the touching PC reported), step / step×8 / **step over** / **step out** / run-to-breakpoint, and a live disassembly listing
+- **Link cable & netplay** (GB/GBC) — host on a port or join any IP for Pokémon trades and other serial-exchange games; hosts bind loopback by default (two windows on one machine) or tick **open to network** to accept a friend joining over LAN/Wi-Fi (or port-forward for internet play)
 - **ROM-hack patches** — IPS, UPS, BPS, APS, RUP (NINJA2), PPF (v1/v2/v3), and xdelta (VCDIFF) applied automatically from a same-named file next to the ROM, or picked alongside it
-- **Game Boy Printer** — full protocol (framing, checksums, RLE, 2bpp tiles): print in-game and PocketGB saves your printout as a PNG. Game Boy Camera photo registers are emulated too
-- **Game clock** — live RTC control panel: clock rates up to a full Pokémon day per 24 s, morning/night/noon quick-sets, persisted into battery saves
-- **Movie recording** — record input to a `.pgm` file and replay it deterministically (state anchor + ROM fingerprint + per-frame input masks)
-- **Ghost racer** — load any recorded `.pgm` and race your best run: loading **arms** the ghost, and your next reset (F8) starts both timelines together from the recording's anchor — or hit `start now` in the banner to launch immediately. The ghost replays at full palette color in its own panel **beside** the game screen (never overlapping it), pausing/freezing with the game; captures stay ghost-free
+- **Game Boy Printer** (GB/GBC) — full protocol (framing, checksums, RLE, 2bpp tiles): print in-game and PocketGB saves your printout as a PNG. Game Boy Camera photo registers are emulated too
+- **Game clock** (GB/GBC) — live RTC control panel: clock rates up to a full Pokémon day per 24 s, morning/night/noon quick-sets, persisted into battery saves
+- **Movie recording** — record input to a `.pgm` file and replay it deterministically (state anchor + ROM fingerprint + per-frame input masks); works for GBA too, with the L/R shoulders in the mask
+- **Ghost racer** (GB/CGB) — load any recorded `.pgm` and race your best run: loading **arms** the ghost, and your next reset (F8) starts both timelines together from the recording's anchor — or hit `start now` in the banner to launch immediately. The ghost replays at full palette color in its own panel **beside** the game screen (never overlapping it), pausing/freezing with the game; captures stay ghost-free
 - **Input echo trainer** — during a ghost race, toggle `echo` in the banner to see the ghost's inputs as a scrolling button-glyph strip under the screen; the moment your input diverges from the recording, "off the recorded path" lights up and the strip dims from that frame — instant feedback on where attempts go wrong
-- **Cheat finder** — built-in RAM scanner: search a value, narrow with changed/unchanged/greater/less or deltas, watch candidates live, and freeze any hit into a real GameShark code in your cheat list
+- **Cheat finder** (GB/CGB) — built-in RAM scanner: search a value, narrow with changed/unchanged/greater/less or deltas, watch candidates live, and freeze any hit into a real GameShark code in your cheat list
 - **Speedrun practice kit** — toggleable in-game HUD (loadless timer, best split, frame counter, live input display) that stays on screen while you play; <kbd>F8</kbd> instantly resets the attempt and the timer restarts on every reset
-- **Super Game Boy** — command-packet transport (P14/P15 bit protocol), SNES palettes (PAL01/23/03/12, PAL_SET, PAL_TRN), attribute maps (ATTR_BLK/LIN/DIV/CHR/TRN/SET), custom borders (CHR_TRN + PCT_TRN composited around the game), screen mask, and MLT_REQ multiplayer detection — headers permitting, as on hardware
-- **Cartridge heatmap** — per-frame PC sampling rendered as a per-bank heat canvas in the debug overlay: watch which banks and regions of the cartridge actually execute, hottest first
-- **RetroAchievements** — log in with your RetroAchievements username + web API key and games with core achievement sets are identified by ROM hash automatically; achievements (the standard rcheevos condition language: memory sizes, alt groups, and-next, modified operands) are evaluated live every frame, unlocks are posted to your account, and the status bar announces each trophy. Hardcore mode, no cheats-required caveats: achievements only track authentic play from power-on
+- **Super Game Boy** (GB) — command-packet transport (P14/P15 bit protocol), SNES palettes (PAL01/23/03/12, PAL_SET, PAL_TRN), attribute maps (ATTR_BLK/LIN/DIV/CHR/TRN/SET), custom borders (CHR_TRN + PCT_TRN composited around the game), screen mask, and MLT_REQ multiplayer detection — headers permitting, as on hardware
+- **Cartridge heatmap** (GB/CGB) — per-frame PC sampling rendered as a per-bank heat canvas in the debug overlay: watch which banks and regions of the cartridge actually execute, hottest first
+- **RetroAchievements** (GB/CGB) — log in with your RetroAchievements username + web API key and games with core achievement sets are identified by ROM hash automatically; achievements (the standard rcheevos condition language: memory sizes, alt groups, and-next, modified operands) are evaluated live every frame, unlocks are posted to your account, and the status bar announces each trophy. Hardcore mode, no cheats-required caveats: achievements only track authentic play from power-on. GBA games are identified but their logic can't run — the mGBA build exposes no GBA memory reads
 - **MBC7 motion controls** — Kirby Tilt'n'Tumble's accelerometer cartridge: tilt with the arrow keys (latch/erase register protocol and the 93LC56 EEPROM bit-level protocol emulated, photo/save data intact); MBC5 rumble cartridges drive gamepad rumble via the existing hook
 - **Convenience** — Recent ROMs menu, drag-and-drop from anywhere in the window, pause (<kbd>⌘P</kbd>), mute (<kbd>⌘M</kbd>), reset (<kbd>⌘R</kbd>)
 
@@ -104,6 +105,8 @@ its 4-cycle window, TIMA write cancellation, and DIV/TAC write edge effects.
 | <kbd>Z</kbd> | B |
 | <kbd>Enter</kbd> | Start |
 | <kbd>Shift</kbd> | Select |
+| <kbd>Q</kbd> | L (GBA) |
+| <kbd>E</kbd> | R (GBA) |
 
 > [!TIP]
 > Keyboard bindings are remappable in-app. Text fields (cheat codes, breakpoints, netplay address) always own the keyboard while focused.
@@ -129,6 +132,7 @@ index.html            UI
 src/core/             The emulator itself — no DOM, no Electron
   cpu.js  mmu.js  ppu.js  ppu-cgb.js  apu.js  timer.js  joypad.js
   cartridge.js  cheats.js  patch.js  printer.js  movie.js  romtitle.js  gameboy.js
+  gba-header.js  gba-mgba.js  mgba-loader.js   (GBA: header detect + mGBA adapter)
 src/ui/               Presentation
   renderer.js  input.js  audio.js  capture.js  rewind.js  debug.js
   boot-animation.js  shader-pack.js
@@ -137,7 +141,7 @@ test/                 Test suite + Blargg/dmg-acid2/cgb-acid2 harnesses
 fonts/                Hack typeface (MIT)
 ```
 
-The `src/core` layer is deliberately dependency-free: it loads both as browser globals (for the app) and CommonJS modules (for Node tests).
+The `src/core` layer is deliberately dependency-free: it loads both as browser globals (for the app) and CommonJS modules (for Node tests). The mGBA WebAssembly core itself lives in `vendor/mgba/`.
 
 </details>
 
@@ -173,9 +177,11 @@ Saves, save states, and the recent-ROMs list live under Electron's `userData` di
 ## Notes
 
 > [!NOTE]
-> CGB games run in full-color Game Boy Color mode; DMG games keep their classic look. A color game can still be forced into DMG mode from the ROM library settings.
+> CGB games run in full-color Game Boy Color mode; DMG games keep their classic look. A color game can still be forced into DMG mode from the ROM library settings. `.gba` ROMs run on the bundled mGBA core and boot straight to the game's own intro — no GBA BIOS file is needed.
 
 > [!IMPORTANT]
 > No ROMs are included — bring your own dumps. Boot ROMs are user-supplied; without one, games fast-boot to the post-boot state.
+
+mGBA is © Jeffrey Pfau and the mGBA contributors, MPL-2.0; the wasm build is from [mgba-wasm](https://github.com/thenick775/mgba-wasm), also MPL-2.0 — see `license.txt`. The GB/CGB emulator code is unaffected by and does not incorporate mGBA source.
 
 Hack font is © Source Foundry Authors, MIT licensed — see `fonts/HACK_LICENSE`.
