@@ -56,8 +56,17 @@ test('movie rejects a different ROM', () => {
 test('mask conversion matches joypad bit order', () => {
   // 0b10010111: bits 0,1,2 = a,b,select; bit 4 = right; bit 7 = down
   const s = maskToState(0b10010111);
-  assert.deepStrictEqual(s, { a: true, b: true, select: true, start: false, right: true, left: false, up: false, down: true });
+  assert.deepStrictEqual(s, { a: true, b: true, select: true, start: false, right: true, left: false, up: false, down: true, l: false, r: false });
   assert.strictEqual(stateToMask(s), 0b10010111);
+});
+
+test('GBA shoulder buttons round-trip through the mask (bits 8/9)', () => {
+  const m = stateToMask({ l: true, r: true, a: true });
+  assert.strictEqual(m, (1 << 0) | (1 << 8) | (1 << 9));
+  const s = maskToState(m);
+  assert.strictEqual(s.l, true); assert.strictEqual(s.r, true); assert.strictEqual(s.a, true);
+  // GB movies never set the shoulder bits, so their masks replay unchanged
+  assert.strictEqual(stateToMask(maskToState(0xFF)), 0xFF);
 });
 
 test('movieRomId is stable and content-sensitive', () => {

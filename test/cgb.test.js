@@ -261,11 +261,11 @@ test('CGB: double-speed halves component ticks per CPU cycle', () => {
   const gb = newCGB();
   gb.cpu.doubleSpeed = true;
   const before = gb.timer.div;
-  gb._tickParts(8);
+  gb._tickHW(8);
   const divAfterDouble = gb.timer.div - before;
   gb.cpu.doubleSpeed = false;
   const before2 = gb.timer.div;
-  gb._tickParts(8);
+  gb._tickHW(8);
   const divAfterNormal = gb.timer.div - before2;
   assert.strictEqual(divAfterDouble, divAfterNormal / 2, 'timer sees half the cycles');
 });

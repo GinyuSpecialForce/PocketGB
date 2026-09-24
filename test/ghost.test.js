@@ -44,7 +44,8 @@ test('ghost loads a recorded movie and validates ROM identity', () => {
 
   const racer = new GhostRacer(me);
   assert.strictEqual(racer.load(bytes), null);
-  assert.strictEqual(racer.frames.length, 10);
+  assert.strictEqual(racer.frameCount, 10, '2 bytes per frame (v2 masks)');
+  assert.strictEqual(racer.frames.length, 20);
   // A different ROM must be rejected with a helpful message.
   const other = new GhostRacer(new FakeGB(9));
   const err = other.load(bytes);
