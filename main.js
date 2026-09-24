@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { isPatchPath } = require('./src/core/patch');
 const { extractRomTitle, titleLooksBroken, basenameOf } = require('./src/core/romtitle');
+const { gbaHeaderValid } = require('./src/core/gba-header');
 const updater = require('./src/main/updater');
 
 // Startup banner — this is the line you see when launching from a terminal.
@@ -92,8 +93,8 @@ function openRomDialog() {
   dialog.showOpenDialog(win, {
     title: 'Open Game Boy ROM',
     filters: [
-      { name: 'Game Boy ROMs and Patches', extensions: ['gb', 'gbc', 'bin', 'rom', 'ips', 'ups', 'bps', 'aps', 'rup', 'ppf', 'vcdiff', 'xdelta'] },
-      { name: 'ROM files', extensions: ['gb', 'gbc', 'bin', 'rom'] },
+      { name: 'Game Boy / Advance ROMs and Patches', extensions: ['gb', 'gbc', 'gba', 'bin', 'rom', 'ips', 'ups', 'bps', 'aps', 'rup', 'ppf', 'vcdiff', 'xdelta'] },
+      { name: 'ROM files', extensions: ['gb', 'gbc', 'gba', 'bin', 'rom'] },
       { name: 'Patches (IPS/UPS/BPS/APS/RUP/PPF/xdelta)', extensions: ['ips', 'ups', 'bps', 'aps', 'rup', 'ppf', 'vcdiff', 'xdelta'] },
     ],
     properties: ['openFile', 'multiSelections'],
@@ -116,9 +117,13 @@ function loadRomFromPath(romPath, patchPath) {
   try {
     if (/\.hdrbak$/i.test(romPath)) throw new Error('That is a header backup written by PocketGB, not a game. Open the .gb/.gbc file instead.');
     const data = fs.readFileSync(romPath);
-    if (data.length < 0x150) throw new Error('File too small to be a Game Boy ROM');
+    if (data.length < 0xC0) throw new Error('File too small to be a supported ROM');
+    const isGba = gbaHeaderValid(data);
+    if (!isGba && data.length < 0x150) throw new Error('File too small to be a Game Boy ROM');
     const name = path.basename(romPath);
-    const title = extractRomTitle(data) || name;
+    const title = isGba
+      ? (new TextDecoder().decode(data.subarray(0xA0, 0xAC)).replace(/\0/g, '').trim() || name)
+      : (extractRomTitle(data) || name);
     currentRom = { name, path: romPath, dir: path.dirname(romPath), title };
     let patchBytes = null, patchName = null;
     if (patchPath && isPatchPath(patchPath)) {
@@ -144,6 +149,13 @@ function loadRomFromPath(romPath, patchPath) {
       patch: patchBytes,
       patchName,
       savePath,
+      kind: isGba ? 'gba' : 'gb',
+      bios: isGba ? (() => {
+        try {
+          const b = fs.readFileSync(path.join(__dirname, 'gba_bios.bin'));
+          return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+        } catch { return null; }
+      })() : null,
       statesDir: statesDir(),
       statesKey: romKey(romPath),
     });
