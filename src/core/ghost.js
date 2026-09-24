@@ -57,7 +57,7 @@ class GhostRacer {
       this.anchorState = bytes.slice(o1 + 4, o1 + 4 + stateLen);
       this.frames = bytes.slice(o1 + 4 + stateLen);
       this.romId = meta.rom;
-      if (this.frames.length < meta.frames) return 'truncated movie file';
+      if (this.frames.length < meta.frames * 2) return 'truncated movie file'; // 2 bytes per frame (v2 masks)
       // Validate the movie belongs to the running game before offering a race.
       if (!this.main || !this.main.cart || !this.main.cart.rom) return 'load a game first';
       const mainId = window.PocketMovie.movieRomId(this.main);
@@ -113,7 +113,7 @@ class GhostRacer {
   step(mainMask) {
     if (!this.active || !this.gb) return null;
     if (this.paused) return null;
-    if (this.pos >= this.frames.length) {
+    if (this.pos >= this.frameCount) {
       this.active = false;
       this.done = true;
       return null;
@@ -123,14 +123,15 @@ class GhostRacer {
     //   diverged — you pressed something the recording didn't (or missed
     //              something it did) at the same frame. "≠ pressed" means the
     //              timelines are no longer comparable from here.
-    this.nextEcho = this.frames[this.pos];
+    this.nextEcho = this.frames[this.pos * 2] | (this.frames[this.pos * 2 + 1] << 8);
     if (mainMask !== undefined && mainMask !== null) {
       if ((mainMask & 0xFF) !== this.nextEcho) {
         if (!this.diverged) this._divergeAt = this.pos; // first frame off the path
         this.diverged = true;
       }
     }
-    const mask = this.frames[this.pos++];
+    const mask = this.frames[this.pos * 2] | (this.frames[this.pos * 2 + 1] << 8);
+    this.pos++;
     this.gb.joypad.setState(window.PocketMovie.maskToState(mask));
     return this.gb.runFrame();
   }
@@ -139,7 +140,7 @@ class GhostRacer {
   // Mask the ghost will play on the NEXT step() (or null when idle/done).
   get echoMask() {
     if (!this.active || this.paused || this.done) return null;
-    return this.pos < this.frames.length ? this.frames[this.pos] : null;
+    return this.pos < this.frameCount ? (this.frames[this.pos * 2] | (this.frames[this.pos * 2 + 1] << 8)) : null;
   }
   // True from the first mismatched frame onward until the race restarts.
   get divergedFromRecording() { return !!this.diverged; }
@@ -178,7 +179,9 @@ class GhostRacer {
     this._divergeAt = null;
   }
 
-  get progress() { return this.frames && this.frames.length ? this.pos / this.frames.length : 0; }
+  get progress() { return this.frameCount ? this.pos / this.frameCount : 0; }
+  // Recorded frame count (v2 movies store 2 bytes per frame).
+  get frameCount() { return this.frames ? this.frames.length / 2 : 0; }
 }
 
 if (typeof module !== 'undefined') module.exports = { GhostRacer };

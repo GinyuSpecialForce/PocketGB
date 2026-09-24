@@ -235,10 +235,20 @@ class CgbPPU extends _BasePPU {
     for (let i = 0; i < 40 && ids.length < 10; i++) {
       const oy = oam[i * 4];
       if (y < oy - 16 || y >= oy - 16 + h) continue;
-      ids.push(i);
+      if (this.opri) {
+        // opri: sort by X then OAM index — insertion sort on the ≤10-element
+        // scratch (key = unique (x<<7|i)) beats Array.sort + closure per line.
+        const key = (oam[i * 4 + 1] << 7) | i;
+        let j = ids.length;
+        ids.push(key);
+        while (j > 0 && ids[j - 1] > key) { ids[j] = ids[j - 1]; j--; }
+        ids[j] = key;
+      } else {
+        ids.push(i);
+      }
     }
     if (this.opri) {
-      ids.sort((a, b) => (oam[a * 4 + 1] - oam[b * 4 + 1]) || (a - b));
+      for (let i = 0; i < ids.length; i++) ids[i] &= 0x7F;
     }
     this.sortedSprites = ids;
   }
@@ -320,14 +330,10 @@ class CgbPPU extends _BasePPU {
       let color;
       if (v & _OBJ_MARK) {
         const bgc = bgRow[x] & 3;
-        // OBJ wins over BG color 0 always, and over BG colors 1+ unless the
-        // BG TO-BG flag is set AND master priority (LCDC bit0) is enabled.
         if (bgc !== 0 && masterPriority && (attrs[x] & 0x80)) {
           const p = ((attrs[x] & 0x07) << 3) + (bgc << 1);
           color = bgpd[p] | (bgpd[p + 1] << 8);
         } else {
-          // row encodes OBJ color in bits 0-1 and palette in bits 6-8; the
-          // byte index into palette RAM is palNum*8 + color*2.
           const oi = (((v >> 6) & 7) << 3) | ((v & 3) << 1);
           color = ocpd[oi] | (ocpd[oi + 1] << 8);
         }

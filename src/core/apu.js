@@ -132,35 +132,48 @@ class APU {
   }
 
   // Advance channel phase counters by n T-cycles.
+  // Steps are solved arithmetically instead of looping per step: a chunk n is
+  // always ≤ one sample period (~95–128 T-cycles) but a phase period can be
+  // as small as 8 T-cycles (high pulse freq / noise), so bounded loops would
+  // still run ~16×; the closed form does it with one modulo. Identical output.
   advanceChannel(c, n) {
     if (c === this.ch[3]) {
       // Noise: LFSR shifts at 524288 Hz / divisor → divisor × 8 T-cycles
       const period = NOISE_DIV[c.divCode] * 8;
-      c.timer += n;
-      while (c.timer >= period) {
-        c.timer -= period;
-        const b = (c.lfsr & 1) ^ ((c.lfsr >> 1) & 1);
-        c.lfsr = (c.lfsr >> 1) | (b << 14);
-        if (c.widthMode) c.lfsr = (c.lfsr & ~0x40) | (b << 6);
+      let t = c.timer + n;
+      if (t >= period) {
+        let shifts = (t / period) | 0;
+        t -= shifts * period;
+        let lfsr = c.lfsr;
+        const wm = c.widthMode;
+        if (wm) {
+          while (shifts-- > 0) {
+            const b = (lfsr & 1) ^ ((lfsr >> 1) & 1);
+            lfsr = ((lfsr >> 1) | (b << 14)) & ~0x40 | (b << 6);
+          }
+        } else {
+          while (shifts-- > 0) {
+            const b = (lfsr & 1) ^ ((lfsr >> 1) & 1);
+            lfsr = (lfsr >> 1) | (b << 14);
+          }
+        }
+        c.lfsr = lfsr;
       }
+      c.timer = t;
       return;
     }
     if (c !== this.ch[2]) {
       // Pulse: one duty step every (2048 - freq) T-cycles (f = 131072/(2048-n) Hz)
       const p = Math.max(1, 2048 - c.freq);
-      c.timer += n;
-      while (c.timer >= p) {
-        c.timer -= p;
-        c.dutyPos = (c.dutyPos + 1) & 7;
-      }
+      const t = c.timer + n;
+      if (t >= p) c.dutyPos = (c.dutyPos + ((t / p) | 0)) & 7;
+      c.timer = t % p;
     } else {
       // Wave: one of 32 samples every (2048 - freq)×2 T-cycles (f = 65536/(2048-n) Hz)
       const p = Math.max(1, Math.floor((2048 - c.freq) * 2));
-      c.timer += n;
-      while (c.timer >= p) {
-        c.timer -= p;
-        c.pos = (c.pos + 1) & 31;
-      }
+      const t = c.timer + n;
+      if (t >= p) c.pos = (c.pos + ((t / p) | 0)) & 31;
+      c.timer = t % p;
     }
   }
 

@@ -21,6 +21,8 @@ class CPU {
     // CGB double-speed state (unused on DMG)
     this.doubleSpeed = false;      // CGB KEY1 bit 7
     this.speedSwitchArmed = false; // CGB KEY1 bit 0
+    // Per-instruction bus-access bookkeeping (see _mAccess)
+    this._nAcc = 0;
   }
 
   // ---- register pair helpers ----
@@ -33,8 +35,15 @@ class CPU {
   get af() { return (this.a << 8) | (this.f & 0xF0); }
   set af(v) { this.a = (v >> 8) & 0xFF; this.f = v & 0xF0; }
 
-  rd(a) { return this.mmu.read(a); }
-  wr(a, v) { this.mmu.write(a, v); }
+  rd(a) { this._mAccess(); return this.mmu.read(a); }
+  wr(a, v) { this._mAccess(); this.mmu.write(a, v); }
+  // Hardware time at bus-access granularity: every m-cycle access delivers its
+  // 4 T-cycles just before the access commits, so an instruction's k-th access
+  // lands at exactly 4k T (hardware behavior — Blargg's instr_timing and
+  // mem_timing probes resolve timer edges against precisely this). Any
+  // remaining internal cycles of the instruction are delivered in bulk by the
+  // frame loop (gameboy._tickBulk) at instruction end.
+  _mAccess() { this._nAcc++; if (this.mmu.tickAccess) this.mmu.tickAccess(4); }
   rd16(a) { return this.rd(a) | (this.rd((a + 1) & 0xFFFF) << 8); }
   wr16(a, v) { this.wr(a, v & 0xFF); this.wr((a + 1) & 0xFFFF, (v >> 8) & 0xFF); }
 
@@ -155,7 +164,6 @@ class CPU {
     if (this.stopped) this.stopped = false; // any enabled interrupt wakes STOP
     if (this.halted) this.halted = false; // interrupts always wake HALT...
     if (!this.ime) return 0;              // ...but are only serviced when IME is set
-    this.halted = false;
     // service highest priority
     for (let i = 0; i < 5; i++) {
       if (pending & (1 << i)) {
@@ -170,26 +178,29 @@ class CPU {
   }
 
   // Execute one instruction (plus servicing one interrupt). Returns m-cycles.
+  // EI's one-instruction delay: IME is set AFTER the instruction following EI
+  // completes (exec() sets imeDelay; it is consumed here, post-exec). This
+  // ordering is observable: `EI / HALT` with (IE&IF)!=0 must hit the HALT bug
+  // (IME is still 0 when HALT runs), not service the interrupt before HALT.
   step() {
-    if (this.imeDelay) { this.ime = true; this.imeDelay = false; }
-    // Hot path: the interrupt check runs before EVERY instruction (~21k times
-    // per frame), so the all-quiet case is inlined here instead of paying a
-    // call frame into checkInterrupts() each time. Identical semantics.
     const mmu = this.mmu;
+    this._nAcc = 0; // bus-access count for this step (bulk-cycle accounting)
     if (mmu.ie & mmu.if & 0x1F) {
       const served = this.checkInterrupts();
       if (served) return served;
     }
     if (this.halted) return 4; // just wait
-    if (this.haltBug) {
-      // HALT bug: PC is left unchanged for the next fetch (byte is read twice)
-      this.haltBug = false;
-      const op0 = this.rd(this.pc);
-      return this.exec(op0);
-    }
-
     const op = this.fetch();
-    return this.exec(op);
+    if (this.haltBug) {
+      // HALT bug: the byte at PC is fetched, but PC fails to increment — the
+      // opcode executes while PC still points at it (multi-byte operands read
+      // the opcode byte; 1-byte ops re-execute until they move PC themselves).
+      this.pc = (this.pc - 1) & 0xFFFF;
+      this.haltBug = false;
+    }
+    const cycles = this.exec(op);
+    if (this.imeDelay) { this.ime = true; this.imeDelay = false; }
+    return cycles;
   }
 
   // STOP: on CGB with KEY1 bit 0 armed, this toggles double-speed and
@@ -368,10 +379,22 @@ class CPU {
 
       // -- misc --
       case 0x00: return 4;            // NOP
-      case 0x76: { // HALT
+      case 0x76: { // HALT (SameBoy semantics)
         const pending = m.ie & m.if & 0x1F;
-        if (pending && !this.ime) this.haltBug = true;
-        else this.halted = true;
+        if (pending) {
+          if (this.ime) {
+            // IME + pending: the interrupt services next step, but the bug
+            // leaves PC pointing at the HALT byte (it is fetched twice).
+            this.pc = (this.pc - 1) & 0xFFFF;
+            this.halted = false;
+          } else {
+            // IME 0 + pending: classic halt bug — no halt, PC refetches.
+            this.halted = false;
+            this.haltBug = true;
+          }
+        } else {
+          this.halted = true;
+        }
         return 4;
       }
       case 0x10: return this.execStop(); // STOP / CGB speed switch

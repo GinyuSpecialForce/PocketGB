@@ -10,12 +10,14 @@ const PAD_BUTTONS = {
   8: 'select', // back/share
   9: 'start',  // start/options
   12: 'up', 13: 'down', 14: 'left', 15: 'right', // d-pad
+  4: 'l', 5: 'r', // shoulder buttons (GBA; ignored by the GB machine)
 };
 const PAD_AXES = { 0: ['left', 'right'], 1: ['up', 'down'] };
 
 const DEFAULT_BINDINGS = {
   up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'],
   a: ['KeyX'], b: ['KeyZ'], start: ['Enter'], select: ['ShiftLeft', 'ShiftRight'],
+  l: ['KeyQ'], r: ['KeyE'], // GBA shoulders (no effect on GB/CGB games)
 };
 if (typeof window !== 'undefined') window.DEFAULT_BINDINGS = DEFAULT_BINDINGS; // plain-script global
 
@@ -26,8 +28,8 @@ const RESERVED = new Set(['Tab', 'Backspace', 'F2', 'F6', 'F8', 'F10']);
 
 class InputManager {
   constructor() {
-    this.state = { up: false, down: false, left: false, right: false, a: false, b: false, start: false, select: false };
-    this.padState = { up: false, down: false, left: false, right: false, a: false, b: false, start: false, select: false };
+    this.state = { up: false, down: false, left: false, right: false, a: false, b: false, start: false, select: false, l: false, r: false };
+    this.padState = { up: false, down: false, left: false, right: false, a: false, b: false, start: false, select: false, l: false, r: false };
     this.bindings = loadBindings();
     this.listeners = [];
     this.hotkeyListeners = [];

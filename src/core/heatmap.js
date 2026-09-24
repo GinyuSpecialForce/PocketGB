@@ -27,6 +27,8 @@ class CartridgeHeatmap {
   }
 
   sample(pc) {
+    // GB-only visualizer: the GBA machine's cart stub has no MBC banks.
+    if (!this.cart || typeof this.cart.bankFor !== 'function') return;
     const bank = this.cart.bankFor(pc & 0x7FFF);
     if (bank === undefined || bank === null) return;
     let arr = this.banks.get(bank);

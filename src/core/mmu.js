@@ -18,6 +18,7 @@ class MMU {
     this.dmaRestartGap = 0;
     // WRAM: bank 0 (C000-CFFF) then banks 1-7 (D000-DFFF), bank n at n*0x1000.
     // On DMG only banks 0-1 exist; wramBank stays 1 so the layout matches.
+    // GameBoy.loadROM resizes this to 0x2000 for DMG after construction.
     this.wram = new Uint8Array(0x8000);
     this.wramBank = 1;           // SVBK: current bank for D000-DFFF (CGB, 0 reads as 1)
     this.ff72 = 0; this.ff73 = 0; this.ff74 = 0; this.ff75 = 0; // CGB FF72-FF75
@@ -29,6 +30,8 @@ class MMU {
     // Debugger watchpoints (set by GameBoy.loadROM / app): BreakpointManager
     // with check(addr, kind, pc) — consulted only when armed.
     this.breakpoints = null;
+    // APU batch accumulator for tickAccess (see tickAccess)
+    this._apuAcc = 0;
   }
 
   read(a) {
@@ -78,6 +81,25 @@ class MMU {
   }
 
   requestInterrupt(bit) { this.if |= (1 << bit) & 0x1F; }
+
+  // Hardware time delivered at bus-access granularity: the CPU calls this
+  // right before each m-cycle access commits (n is normally 4 T-cycles), so
+  // timer/serial-register reads and writes observe hardware-accurate timing
+  // (Blargg instr_timing / mem_timing measure exactly this). PPU vblank
+  // raised here still wakes a HALTed CPU on the next step.
+  tickAccess(n) {
+    this.timer.tick(n);
+    this.ppu.tick(n);
+    // APU is batched — per-access calls are the hot path's dominant cost and
+    // audio can't hear the difference (the APU's own inner loop still splits
+    // at exact sample boundaries). Flushed every frame in GameBoy.runFrame and
+    // before state capture, so per-frame sample counts stay exact. 512 T-cycles
+    // (~0.12 ms max register-observe skew) quarters the flush count vs 128.
+    if ((this._apuAcc += n) >= 512) { this.apu.tick(this._apuAcc); this._apuAcc = 0; }
+    // Serial only does work mid-transfer; DMA only while a copy is active.
+    if (this.serial && this.serial._state !== 0) this.serial.tick(n);
+    if (this.dmaActive) this.dmaTick(n);
+  }
 
   // ---- OAM DMA (FF46): 160-byte copy over 648 T-cycles (2 startup + 160×4 + 4) ----
   startOAMDMA(v) {

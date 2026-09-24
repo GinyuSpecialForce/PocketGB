@@ -46,8 +46,12 @@ class Timer {
     // that are multiples of the period — count those in (div, div+n].
     const bit = Timer.BITSELECT[this.tac & 3];
     const P = 1 << (bit + 1);
-    const div2 = this.div + n;
-    let edges = Math.floor(div2 / P) - Math.floor(this.div / P);
+    const div = this.div;
+    const div2 = div + n;
+    // Fast path: no period boundary inside this (small) window — the common
+    // case at per-access granularity. Same edge math, one less division pair.
+    if (((div2 / P) | 0) === ((div / P) | 0)) { this.div = div2 & 0xFFFF; return; }
+    let edges = Math.floor(div2 / P) - Math.floor(div / P);
     this.div = div2 & 0xFFFF;
     while (edges-- > 0) this.incrementTIMA();
   }

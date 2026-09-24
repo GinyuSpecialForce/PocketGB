@@ -12,11 +12,24 @@ const _Joypad = (typeof Joypad !== 'undefined') ? Joypad : require('./joypad').J
 const _Cartridge = (typeof Cartridge !== 'undefined') ? Cartridge : require('./cartridge').Cartridge;
 const _BreakpointManager = (typeof BreakpointManager !== 'undefined') ? BreakpointManager : require('./debugger').BreakpointManager;
 const _CheatEngine = (typeof CheatEngine !== 'undefined') ? CheatEngine : require('./cheats').CheatEngine;
+const _cheatsMod = (typeof require === 'function') ? require('./cheats') : null;
+const _GbaCheatList = (typeof GbaCheatList !== 'undefined') ? GbaCheatList : (_cheatsMod && _cheatsMod.GbaCheatList);
 const _Serial = (typeof Serial !== 'undefined') ? Serial : require('./serial').Serial;
+const _SGB = (typeof SGB !== 'undefined') ? SGB : require('./sgb').SGB;
+const _gbaHeaderValid = (typeof gbaHeaderValid !== 'undefined') ? gbaHeaderValid
+  : (typeof require === 'function' ? require('./gba-header').gbaHeaderValid : null);
+
+function isGbaRom(bytes) {
+  if (!_gbaHeaderValid) return false;
+  try { return _gbaHeaderValid(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)); }
+  catch { return false; }
+}
 
 class GameBoy {
   constructor() {
     this.cart = null;
+    this._gba = null;          // MgbaMachine when a GBA ROM is attached
+    this._pendingGba = null;   // { bytes, saveBytes } while the wasm core loads
     this.cheats = new _CheatEngine();
     this._bpMgr = new _BreakpointManager(); // debugger watchpoints (bound to each MMU at loadROM)
     this.serial = new _Serial();
@@ -25,13 +38,44 @@ class GameBoy {
     this.apu = new _APU();
     this.joypad = new _Joypad({ requestInterrupt: (b) => this.requestInterrupt(b) });
     this.timer = new _Timer({ requestInterrupt: (b) => this.requestInterrupt(b) });
-    this.cpu = new _CPU(this);
+    // Constructor-time CPU gets no MMU yet (machine wiring happens in loadROM);
+    // loadROM always builds a fresh CPU bound to the real MMU.
+    this.cpu = new _CPU({ read: () => 0xFF, write() {}, tickAccess() {}, ie: 0, if: 0, requestInterrupt() {}, cpu: { pc: 0 } });
   }
 
   requestInterrupt(bit) { this.cpu.mmu && this.cpu.mmu.requestInterrupt(bit); }
 
   loadROM(bytes, saveData, forceDmg, bootBytes) {
-    if (this.cart) this.cart.dispose();
+    if (isGbaRom(bytes)) {
+      // GBA path: the mGBA wasm machine loads asynchronously. Park the ROM and
+      // expose a stub surface immediately; attachGbaMachine() finishes the job
+      // (app.js awaits it before running frames).
+      this._gba = null;
+      this._pendingGba = { bytes: bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes), saveBytes: saveData || null };
+      // GBA codes are applied by mGBA (via the .cheats file), not by the GB
+      // engine — swap in the GBA validator so UI add/restore rejects GB codes.
+      if (_GbaCheatList && !(this.cheats instanceof _GbaCheatList)) this.cheats = new _GbaCheatList();
+      this.cart = {
+        rom: this._pendingGba.bytes,
+        dirty: false,
+        battery: true,
+        serializeSav: () => (this._gba ? this._gba.getSav() : new Uint8Array(0)),
+      };
+      // Neutral GB-side surface so UI probes (mmu.cgb, cpu.pc, joypad) don't
+      // crash while the real machine boots up.
+      this.cpu = { pc: 0, halted: false, doubleSpeed: false };
+      this.ppu = { framebuffer: new Uint8Array(160 * 144), colorFramebuffer: new Uint32Array(160 * 144), cgb: true, frameComplete: false, frameReady: false };
+      this.mmu = { cgb: true, read: () => 0xFF, write() {} };
+      this.apu = { outputRate: 48000, available: () => 0, pull: () => false, pullBlock: () => new Float32Array(0), setOutputRate() {}, tick() {}, reset() {} };
+      this.joypad = { setState: () => {} };
+      this._bootBytes = bootBytes || null; // unused by mGBA (HLE boot); kept for reset
+      return;
+    }
+    this._gba = null;
+    this._pendingGba = null;
+    // Coming off a GBA game the cheat list validates GBA formats — swap back.
+    if (!(this.cheats instanceof _CheatEngine)) this.cheats = new _CheatEngine();
+    if (this.cart) this.cart.dispose && this.cart.dispose();
     this.cart = new _Cartridge(bytes);
     this.cart.cheats = this.cheats; // Game Genie patches read from this cart
     const cgb = !forceDmg && this.cart.isGBC;
@@ -41,85 +85,78 @@ class GameBoy {
     // PPU otherwise (reused if already the right kind).
     const wantCgb = cgb && !(this.ppu instanceof _CgbPPU);
     const wantDmg = !cgb && (this.ppu instanceof _CgbPPU);
-    if (wantCgb || wantDmg) {
-      const PpuClass = cgb ? _CgbPPU : _PPU;
-      this.ppu = new PpuClass({ requestInterrupt: (b) => this.requestInterrupt(b), readByte: () => 0xFF });
-    }
-    this.mmu = new _MMU(this.cpu, this.cart, this.ppu, this.apu, this.timer, this.joypad);
+    this.mmu = new _MMU(this, this.cart, cgbWram);
+    this.mmu.breakpoints = this._bpMgr; // debugger watchpoints ride the MMU
+    this.mmu.cpu = this.cpu;
+    this.mmu.cgb = cgb; // CGB address map + registers follow the cartridge flag
+    // WRAM size matches the console: 8 banks on CGB, one on DMG.
     this.mmu.wram = new Uint8Array(cgbWram);
-    this.mmu.serial = this.serial;
-    this.mmu.cgb = cgb;
-    // Super Game Boy layer: only for DMG games with the SGB unlock in the
-    // header (0x146=03 + old licensee 0x33) — the ICD2 gate for SGB features.
-    const _SGB = (typeof SGB !== 'undefined') ? SGB : require('./sgb').SGB;
-    const sgbUnlocked = !cgb && this.cart.rom[0x146] === 0x03 && this.cart.rom[0x14B] === 0x33;
-    if (sgbUnlocked) {
-      this.sgb = new _SGB();
-      this.joypad.sgb = this.sgb;
-    } else {
-      this.sgb = null;
-      this.joypad.sgb = null;
-    }
-    // Optional authentic boot ROM (user-supplied dump): DMG (256 B) maps at
-    // 0000-00FF; CGB (2 KB, incl. the color intro) maps at 0000-08FF. Without
-    // one the CPU starts at the post-boot state (built-in fast boot).
-    const boot = bootBytes && bootBytes.length >= 0x100 ? bootBytes : null;
-    this.mmu.bootrom = boot;
-    this.mmu.bootromDisabled = !boot;
-    if (boot) {
-      this.cpu.a = 0; this.cpu.f = 0; this.cpu.b = 0; this.cpu.c = 0;
-      this.cpu.d = 0; this.cpu.e = 0; this.cpu.h = 0; this.cpu.l = 0;
-      this.cpu.sp = 0; this.cpu.pc = 0;
-      this.cpu.ime = false; this.cpu.imeDelay = false; this.cpu.halted = false;
-    }
-    this.cpu.mmu = this.mmu;
-    this.ppu.mmu = this.mmu; // HDMA source reads
-    // Debugger: the MMU consults the BreakpointManager on every read/write
-    // (cost: one null check when no watchpoints are armed). Survives PPU/MMU
-    // swaps across DMG↔CGB loads — the app sets this once.
-    this.mmu.breakpoints = this._bpMgr || (this._bpMgr = new _BreakpointManager());
-    this.resetComponents();
-    // resetComponents() builds a fresh Joypad (its select bits are part of the
-    // reset state) — re-link the SGB transport that loadROM attached above.
-    this.joypad.sgb = this.sgb || null;
-    // Cache for in-app resets: without this, resetGame() would reboot with the
-    // built-in fast boot instead of the user's authentic boot ROM.
-    this._bootBytes = boot;
-    if (saveData) this.cart.loadSav(saveData);
-    // Hot-loop bindings (runFrame calls these thousands of times per frame)
-    this._cpuStep = this.cpu.step.bind(this.cpu);
-    // APU tick batching: audio timestamps only need ~ms accuracy, so defer APU
-    // ticks into ~96 T-cycle (23 µs) batches instead of ticking per CPU
-    // instruction — removes ~19k call frames/frame on double-speed CGB with no
-    // audible difference. Flushed at frame end and around save/load.
-    this._apuPending = 0;
-    this._tickParts = (n) => {
-      // CGB double speed: the CPU runs twice as fast, so timed components
-      // see half as many of their (4.19 MHz) cycles per CPU cycle.
-      const slow = this.cpu.doubleSpeed ? (n >> 1) : n;
-      this.timer.tick(slow);
-      this.ppu.tick(slow);
-      this._apuPending += slow;
-      if (this._apuPending >= 96) { this.apu.tick(this._apuPending); this._apuPending = 0; }
-      this.serial.tick(slow);
-      this.mmu.dmaTick(slow);
-      if (this.ppu.hdmaTick) this.ppu.hdmaTick();
+    if (wantCgb) this.ppu = new _CgbPPU({ requestInterrupt: (b) => this.requestInterrupt(b) });
+    if (wantDmg) this.ppu = new _PPU({ requestInterrupt: (b) => this.requestInterrupt(b), readByte: () => 0xFF });
+    this.ppu.readByte = (a) => this.mmu.read(a & 0xFFFF, true);
+    this.ppu.mmu = this.mmu; // CGB HDMA reads its source through the bus
+    this.cpu = new _CPU(this.mmu); // CPU reads/writes through the MMU
+    this.mmu.cpu = this.cpu; // MMU watchpoint checks read cpu.pc
+    // Hardware tickers. Per-access time already flows through MMU.tickAccess
+    // during cpu.step(); _tickBulk delivers the remaining internal cycles of an
+    // instruction at instruction end, and _tickHW is the bulk ticker used by
+    // the frame loop and tests (CPU cycles → hardware ticks, halving on CGB
+    // double speed since the CPU runs at twice the base rate).
+    this._cpuStep = () => this.cpu.step();
+    this._tickHW = (cycles) => {
+      const n = this.cpu.doubleSpeed ? Math.max(1, cycles >> 1) : cycles;
+      this.mmu.tickAccess(n);
     };
-  }
-
-  // Push any batched APU cycles through before state capture / frame end.
-  _flushApu() {
-    if (this._apuPending) { this.apu.tick(this._apuPending); this._apuPending = 0; }
-  }
-
-  resetComponents() {
-    this._apuPending = 0; // fresh APU timeline: drop any batched cycles
-    this.cpu.reset();
-    this.ppu.reset();
-    this.apu.reset();
-    this.timer.reset();
-    this.joypad = new _Joypad({ requestInterrupt: (b) => this.requestInterrupt(b) });
+    this._tickBulk = (cycles) => {
+      const rem = cycles - this.cpu._nAcc * 4;
+      if (rem > 0) this._tickHW(rem);
+    };
+    // MMU needs live component references (joypad serial lines, PPU registers,
+    // timer cascade); they are assigned after construction.
+    this.mmu.cart = this.cart;
+    this.mmu.ppu = this.ppu;
+    this.mmu.apu = this.apu;
+    this.mmu.timer = this.timer;
     this.mmu.joypad = this.joypad;
+    this.mmu.serial = this.serial;
+    this.cart.loadSav(saveData);
+    // Super Game Boy: an unlocked DMG cart (SGB games) gets the SGB layer so
+    // packets ride the joypad's P14/P15 lines. Built fresh per loadROM and
+    // linked to the live joypad so resets never orphan it.
+    this.sgb = (!cgb && this.cart.rom[0x146] === 0x03 && this.cart.rom[0x14B] === 0x33) ? new _SGB() : null;
+    if (this.sgb) { this.joypad.sgb = this.sgb; }
+    if (this.cart.mbc7) {
+      const _Mbc7 = (typeof Mbc7 !== 'undefined') ? Mbc7 : require('./mbc7').Mbc7;
+      this.cart.mbc7 = new _Mbc7();
+    }
+    this.reset();
+    if (this.cart.cheats !== this.cheats)    this.cart.cheats = this.cheats;
+    this.cheats.applyROM && this.cheats.applyROM(this.cart);
+  }
+
+  // Async completion of the GBA load path. Resolves once the mGBA wasm core
+  // has booted the ROM. Safe to call when the ROM is a GB/CGB cart (no-op).
+  async attachGbaMachine() {
+    if (!this._pendingGba) return;
+    const { bytes, saveBytes } = this._pendingGba;
+    this._pendingGba = null;
+    if (typeof createMgbaMachine !== 'function') throw new Error('mGBA adapter not loaded');
+    const machine = await createMgbaMachine(this._gbaCanvas || document.createElement('canvas'));
+    machine.loadROM(bytes, saveBytes);
+    this._gba = machine;
+    this.cart = machine.cart;
+    this.cpu = { pc: 0, halted: false, doubleSpeed: false, _gbaStub: true };
+    this.ppu = machine.ppu;
+    this.apu = machine.apu;
+    this.joypad = machine.joypad;
+    this.mmu = { cgb: true, read: () => 0xFF, write() {} };
+    this.serial = machine.serial;
+  }
+
+  get isGba() { return !!this._gba || !!this._pendingGba; }
+
+  reset() {
+    if (this._gba) { this._gba.reset(); return; }
     this.serial.reset();
     if (this.mmu.cgb) {
       // Post-boot CGB register state (cgb_boot values)
@@ -133,7 +170,8 @@ class GameBoy {
 
   // ---- save states ----
   saveState() {
-    this._flushApu(); // no un-emulated cycles hiding in the batcher
+    if (this._gba) return this._gba.saveState();
+    if (this.mmu._apuAcc) { this.apu.tick(this.mmu._apuAcc); this.mmu._apuAcc = 0; } // flush APU batch: no un-emulated cycles in the snapshot
     const c = this.cpu, p = this.ppu, a = this.apu, t = this.timer, m = this.mmu, k = this.cart;
     const isCgb = this.mmu.cgb;
     const header = {
@@ -180,10 +218,10 @@ class GameBoy {
   }
 
   loadState(u8) {
+    if (this._gba) return this._gba.loadState(u8);
     const { header, blobs } = decodeState(u8);
     if (header.v > 2) throw new Error('Unsupported state version');
     if (!!header.cgb !== !!this.mmu.cgb) throw new Error('State is for a different console type');
-    this._apuPending = 0; // the loaded state owns the APU timeline from here
     const c = this.cpu, p = this.ppu, a = this.apu, t = this.timer, m = this.mmu, k = this.cart;
     Object.assign(c, header.cpu);
     // Strip undefined so older/newer state versions never clobber live fields
@@ -230,46 +268,98 @@ class GameBoy {
   clearWatchpoints() { this._bpMgr.clear(); }
 
   stepInstruction() {
-    // one CPU step with full component ticking (slower than runFrame's loop
-    // but identical semantics); returns m-cycles consumed. _tickParts already
-    // halves internally at double speed — pass raw cycles, never pre-scale.
+    if (this._gba) return 1; // mGBA drives its own loop; single-step is GB-only
+    // one CPU step with per-access hardware delivery; returns m-cycles consumed.
     const cycles = this._cpuStep ? this._cpuStep() : this.cpu.step();
-    if (this._tickParts) this._tickParts(cycles);
+    if (this._tickBulk) this._tickBulk(cycles);
     return cycles;
   }
 
+  // While the CPU is halted (HALT/STOP) nothing observes memory, so instead of
+  // stepping 4 T at a time — a full 5-component tick chain every step — we
+  // deliver time up to the next event that can change interrupt state. The
+  // horizons are exact, so wake timing is identical, just batched:
+  //   • PPU mode boundary (STAT/vblank edges), in dots
+  //   • timer pending reload, or the next falling DIV edge (TIMA overflow IRQ)
+  //   • serial transfer completion (serial IRQ)
+  // Capped so an event-free stretch still advances in bounded chunks.
+  _idleHorizon() {
+    const t = this.timer, p = this.ppu, s = this.serial;
+    let h = 456; // one scanline: bounds chunk size when nothing is scheduled
+    if (p.lcdc & 0x80) {
+      const b = p.mode === 3 ? 252 : (p.mode === 2 ? 80 : 456);
+      const d = b - p.dot;
+      if (d > 0 && d < h) h = d;
+    }
+    if (t.reloadIn >= 0) {
+      if (t.reloadIn < h) h = t.reloadIn;
+    } else if (t.tac & 0x04) {
+      const P = 1 << ((t.tac & 3) === 0 ? 10 : (t.tac & 3) === 1 ? 4 : (t.tac & 3) === 2 ? 6 : 8);
+      const rem = P - (t.div % P);
+      if (rem < h) h = rem;
+    }
+    if (s && s._state !== 0) {
+      const c = s._state === 2 ? (s._counter > 0 ? s._counter : 0) : s._counter;
+      if (c > 0 && c < h) h = c;
+    }
+    return h > 0 ? h : 1;
+  }
+
   runFrame() {
+    if (this._gba) return this._gba.runFrame();
+    if (this._pendingGba) return null; // mGBA core still booting
     if (!this.cart || !this.mmu) return null;
     const fb = this.ppu.colorFramebuffer || this.ppu.framebuffer;
+    const cpu = this.cpu;
+    const mmu = this.mmu;
+    const ppu = this.ppu;
     const cpuStep = this._cpuStep;
-    const tickParts = this._tickParts;
-    this.ppu.frameComplete = false; // consume last frame's vblank flag
-    this.ppu.frameReady = false;
+    const tickHW = this._tickHW;
+    const tickBulk = this._tickBulk;
+    ppu.frameComplete = false; // consume last frame's vblank flag
+    ppu.frameReady = false;
     // Budget is one frame in 4.19 MHz master T-cycles. In CGB double speed the
     // CPU runs twice as fast, so it gets twice as many cycles and the timed
-    // components see half as many of their base-rate ticks (tickParts halves).
+    // components see half as many of their base-rate ticks (tickers halve).
     let budget = 70224;
     const bps = this._breakpoints;
     const bp = this._bpMgr; // watchpoints: armed check is 3 loads, no call
     this._watchFired = false;
     while (budget > 0) {
-      if (bp && bp.armed && bp.enabled) { this.cpu._watchHit = false; }
-      if (bps && bps.has(this.cpu.pc)) break; // debugger: halt at the breakpoint
+      if (bp && bp.armed && bp.enabled) { cpu._watchHit = false; }
+      if (bps && bps.has(cpu.pc)) break; // debugger: halt at the breakpoint
+      if (cpu.halted && !(mmu.ie & mmu.if & 0x1F)) {
+        // Batched idle: advance to the next interrupt-relevant event boundary.
+        // Once a pending interrupt appears (IE&IF != 0) we drop through to the
+        // normal step path below so cpu.step() wakes/serves it.
+        const chunk0 = this._idleHorizon();
+        const chunk = chunk0 < budget ? chunk0 : budget;
+        // Horizons are master (base-rate) T-cycles; _tickHW takes CPU cycles,
+        // so double speed delivers twice as many for the same component time.
+        tickHW(cpu.doubleSpeed ? chunk << 1 : chunk);
+        budget -= chunk;
+        if (ppu.frameComplete) break; // vblank reached: frame is on screen
+        continue;
+      }
       // cpu.step handles HALT and STOP internally (cheap wait path + interrupt wake).
       let cycles = cpuStep();
-      if (bp && bp.armed && bp.enabled && this.cpu._watchHit) { // debugger: watchpoint fired
-        this.cpu._watchHit = false;
+      if (bp && bp.armed && bp.enabled && cpu._watchHit) { // debugger: watchpoint fired
+        cpu._watchHit = false;
         this._watchFired = true;
         break;
       }
-      const master = this.cpu.doubleSpeed ? Math.max(1, cycles >> 1) : cycles;
-      if (master > budget) { cycles = budget << (this.cpu.doubleSpeed ? 1 : 0); }
-      tickParts(cycles);
+      const master = cpu.doubleSpeed ? Math.max(1, cycles >> 1) : cycles;
+      if (master > budget) { cycles = budget << (cpu.doubleSpeed ? 1 : 0); }
+      // Deliver the non-access portion of the instruction's time (accesses
+      // already ticked through MMU.tickAccess during the step). Inlined here:
+      // this runs once per instruction, so the call saved is worth it.
+      const rem = cycles - cpu._nAcc * 4;
+      if (rem > 0) tickHW(rem);
       budget -= master;
-      if (this.ppu.frameComplete) break; // vblank reached: frame is on screen
+      if (ppu.frameComplete) break; // vblank reached: frame is on screen
     }
+    if (mmu._apuAcc) { this.apu.tick(mmu._apuAcc); mmu._apuAcc = 0; } // flush APU batch: exact per-frame sample count
     if (this.cheats) this.cheats.applyRAM(this.mmu); // GameShark: once per frame
-    this._flushApu(); // emit the frame's final audio samples
     // SGB VRAM transfer: a pending _TRN command latches; the next completed
     // frame delivers 8000-8FFF to the SGB (real hardware reads over 5 frames).
     if (this.sgb && this.sgb.pendingTrn) this.sgb.consumeVramBlock(this.ppu.vram.subarray(0, 0x1000));

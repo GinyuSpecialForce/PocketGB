@@ -119,6 +119,27 @@ class Renderer {
     this.gctx = this.ghostCanvas.getContext('2d');
     this.ghostImage = this.gctx.createImageData(160, 144);
     this.ghostPx = new Uint32Array(this.ghostImage.data.buffer);
+    this.width = 160;
+    this.height = 144;
+  }
+
+  setResolution(width, height) {
+    width = width | 0; height = height | 0;
+    if (width <= 0 || height <= 0 || (width === this.width && height === this.height)) return;
+    this.width = width; this.height = height;
+    this.offscreen.width = width; this.offscreen.height = height;
+    this.imageData = this.octx.createImageData(width, height);
+    this.px = new Uint32Array(this.imageData.data.buffer);
+    this.scanCanvas.width = width; this.scanCanvas.height = height;
+    this._buildScanlines();
+    this.prevPx = null;
+    // Keep the visible canvas backing store at native resolution so present()
+    // is a 1:1 draw (GBA's 240×160 previously got resampled into a 160×144
+    // backing before CSS scaling, softly distorting the picture).
+    if (this.canvas.width !== width || this.canvas.height !== height) {
+      this.canvas.width = width; this.canvas.height = height;
+      this.ctx.imageSmoothingEnabled = false;
+    }
   }
 
   setPalette(colors) {
@@ -293,13 +314,14 @@ class Renderer {
   // Pre-render the 2D-path scanline overlay once (every other row darkened ~18%).
   _buildScanlines() {
     const c = this.scanCanvas.getContext('2d');
-    const img = c.createImageData(160, 144);
+    const img = c.createImageData(this.width || 160, this.height || 144);
+    const width = this.width || 160, height = this.height || 144;
     const px = new Uint32Array(img.data.buffer);
-    for (let y = 0; y < 144; y++) {
+    for (let y = 0; y < height; y++) {
       const dark = (y & 1) === 1;
       // black with alpha 46/255 ≈ 18%
       const v = dark ? 0x2E000000 : 0x00000000;
-      for (let x = 0; x < 160; x++) px[y * 160 + x] = v;
+      for (let x = 0; x < width; x++) px[y * width + x] = v;
     }
     c.putImageData(img, 0, 0);
   }
@@ -308,7 +330,11 @@ class Renderer {
   // buffer (CGB, 1 uint32/pixel). Blends ghosting with the previous frame.
   blit(fb, isColor) {
     if (!fb) return;
-    if (!this.px) this.px = new Uint32Array(this.imageData.data.buffer);
+    const gbaFrame = fb.length === 240 * 160;
+    if (gbaFrame) isColor = true;
+    const wantW = gbaFrame ? 240 : 160, wantH = gbaFrame ? 160 : 144;
+    if (this.width !== wantW || this.height !== wantH) this.setResolution(wantW, wantH);
+    if (!this.px || this.px.length !== this.width * this.height) this.px = new Uint32Array(this.imageData.data.buffer);
     if (!this._rgb555LUT) {
       // 32K-entry BGR555→xRGB888 LUT: the CGB blit is otherwise 23,040
       // function calls per frame (the single largest per-frame CPU cost for
@@ -426,7 +452,7 @@ class Renderer {
     // An active pack's uniform overrides win over the defaults.
     const ov = this.shaderPack ? packUniformOverrides(this.shaderPack) : null;
     gl.uniform2f(this.glUniform.outPx, this.glCanvas.width, this.glCanvas.height);
-    gl.uniform2f(this.glUniform.cells, 160, 144);
+    gl.uniform2f(this.glUniform.cells, this.width, this.height);
     gl.uniform1f(this.glUniform.curv, ov && ov.curv !== undefined ? ov.curv : this.effects.curvature ? 1.0 : 0.0);
     gl.uniform1f(this.glUniform.grid, ov && ov.grid !== undefined ? ov.grid : 0.35);
     // subpixel stripes only make sense when a cell spans >= 3 device px

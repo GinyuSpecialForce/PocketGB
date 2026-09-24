@@ -1,5 +1,11 @@
 // PocketGB — cheat engine: GameShark (RAM writes) + Game Genie (ROM patches)
 //
+// GB/CGB codes run through the in-process CheatEngine below (per-frame MMU
+// writes / ROM read patches). GBA codes run through mGBA's own cheat engine
+// (see gbaCheatsFile below): the wasm core exposes no memory write API, so
+// codes are validated here, persisted per game, and handed to the core as a
+// .cheats file loaded at boot.
+//
 // GameShark GB format: TTVVLLHH — 8 hex digits:
 //   TT      = device bank tag — IGNORED (mGBA discards it too). Most codes
 //             use '01', but real published codes use other tags, e.g. Super
@@ -44,6 +50,83 @@ function parseGameGenie(raw) {
     compare = t ^ 0xBA;
   }
   return { addr, value, compare };
+}
+
+// ---- GBA cheat formats (parsed for validation/description; mGBA applies) ----
+// mGBA's GBACheatAddLine autodetects three line shapes:
+//   "XXXXXXXX XXXXXXXX"  GameShark / Pro Action Replay (encrypted — mGBA
+//                        decrypts using the ROM's CRC, so the operands are
+//                        ciphertext and only the shape can be validated here)
+//   "XXXXXXXX XXXX"      CodeBreaker v3 — high nibble of the first operand is
+//                        the op type, the low 28 bits are the bus address
+//                        (GBACheatAddCodeBreaker: address = op1 & 0x0FFFFFFF);
+//                        codes after an M/ENCRYPT code are encrypted too
+//   "XXXXXXXX:YY"        VBA-format raw write (address : byte, repeatable)
+// Dashes and spaces are interchangeable separators; letter case is not.
+
+// Parse a GBA cheat line → { format, address, value } or null.
+// address/value describe the *effect* where the format makes that meaningful
+// (VBA); for the encrypted AR/GS shape they describe the raw operands.
+function parseGbaCheatLine(raw) {
+  const s = String(raw).trim().toUpperCase().replace(/-/g, ' ').replace(/\s+/g, ' ');
+  let m = /^([0-9A-F]{8}) ([0-9A-F]{8})$/.exec(s);
+  if (m) {
+    // Encrypted GameShark/AR: the operands are ciphertext, so no address check
+    // is possible (or correct) — shape only, exactly like mGBA's autodetect.
+    return { format: 'ar', address: parseInt(m[1], 16), value: parseInt(m[2], 16) };
+  }
+  m = /^([0-9A-F]{8}) ([0-9A-F]{4})$/.exec(s);
+  if (m) {
+    // CodeBreaker: high nibble = op type, low 28 bits = bus address. Encrypted
+    // CB codes are legal too, so this is a display decode, not a filter.
+    return { format: 'cb', address: parseInt(m[1], 16) & 0x0FFFFFFF, value: parseInt(m[2], 16) };
+  }
+  m = /^([0-9A-F]{8}):([0-9A-F]{2})$/.exec(s);
+  if (m) {
+    return { format: 'vba', address: parseInt(m[1], 16), value: parseInt(m[2], 16) };
+  }
+  return null;
+}
+
+const GBA_FORMAT_NAMES = { ar: 'GameShark / Pro Action Replay', cb: 'CodeBreaker v3', vba: 'VBA raw write' };
+
+// Plain-language description of a GBA cheat line (mirrors describeCheat's job
+// on GB: makes typos and wrong-game codes visible before they do damage).
+function describeGbaCheat(entry) {
+  const a = entry.address, v = entry.value;
+  const hx = (n, w) => n.toString(16).toUpperCase().padStart(w, '0');
+  const what = [`${GBA_FORMAT_NAMES[entry.format] || entry.format} code`];
+  if (entry.format === 'vba') {
+    let region = 'IWRAM (fast RAM)';
+    if (a >= 0x02000000 && a < 0x02040000) region = 'EWRAM';
+    else if (a >= 0x03000000 && a < 0x03008000) region = 'IWRAM (fast RAM)';
+    else if (a >= 0x04000000 && a < 0x04000400) region = 'hardware I/O';
+    else if (a >= 0x05000000 && a < 0x05000400) region = 'palette RAM';
+    else if (a >= 0x06000000 && a < 0x06018000) region = 'VRAM';
+    else if (a >= 0x07000000 && a < 0x07000400) region = 'OAM (sprite table)';
+    what.push(`writes ${hx(v, 2)} (${v}) to ${region} at $${hx(a, 8)}`);
+    if (a >= 0x04000000 && a < 0x04000400) what.push('⚠ I/O register: may fight the hardware itself');
+  } else {
+    // Encrypted AR/GS + CodeBreaker: the value's meaning depends on the code
+    // type byte, so describe the shape and the most common intents.
+    what.push(`mGBA applies this code (operands ${hx(entry.address, 8)} ${entry.format === 'ar' ? hx(v, 8) : hx(v, 4)})`);
+    if (v === 0x63 || v === 0x0063) what.push('value 99 (classic max-count code)');
+    if (v === 0xFF || v === 0x00FF) what.push('value 255 (often max)');
+  }
+  return what.join('; ');
+}
+
+// Serialize a validated GBA cheat list into mGBA's .cheats file format
+// (mCheatParseFile: "# Name" opens a named set, "!disabled" before a set
+// disables it, bare lines join the current set). One set per cheat keeps
+// toggling exact: a disabled set is never applied by the core.
+function gbaCheatsFile(cheats) {
+  const blocks = [];
+  for (const c of cheats || []) {
+    if (!c || typeof c.code !== 'string' || !parseGbaCheatLine(c.code)) continue;
+    blocks.push(`${c.enabled === false ? '!disabled\n' : ''}# cheat\n${c.code.trim().toUpperCase()}`);
+  }
+  return blocks.join('\n');
 }
 
 class CheatEngine {
@@ -124,6 +207,46 @@ class CheatEngine {
       return c.value;
     }
     return undefined;
+  }
+}
+
+// ---- GBA cheat list (mGBA-backed) -----------------------------------------
+// Mirrors CheatEngine's list surface (add/toggle/remove/clear/all/serialize/
+// restore) but validates GBA code formats and never touches memory: applying
+// happens inside mGBA via the synced .cheats file. Kept GB-independent so the
+// two engines never share validation (a GB GameShark code is meaningless on
+// GBA and vice versa).
+class GbaCheatList {
+  constructor() { this.codes = []; } // { code, format, address, value, enabled }
+
+  add(raw) {
+    const text = String(raw).trim().toUpperCase().replace(/-/g, ' ').replace(/\s+/g, ' ');
+    const parsed = parseGbaCheatLine(text);
+    if (!parsed) {
+      return { error: 'Not a valid GBA cheat code (GameShark/Pro Action Replay XXXXXXXX XXXXXXXX, CodeBreaker XXXXXXXX XXXX, or VBA XXXXXXXX:YY)' };
+    }
+    const entry = { code: text, enabled: true, ...parsed };
+    this.codes.push(entry);
+    return entry;
+  }
+
+  remove(index) { if (index >= 0 && index < this.codes.length) this.codes.splice(index, 1); }
+
+  toggle(index) { const c = this.codes[index]; if (c) c.enabled = !c.enabled; }
+
+  clear() { this.codes.length = 0; }
+
+  all() { return this.codes.slice(); }
+
+  serialize() { return this.codes.map((c) => ({ code: c.code, enabled: c.enabled })); }
+
+  restore(list) {
+    this.clear();
+    for (const c of list || []) {
+      if (!c || typeof c.code !== 'string') continue;
+      const parsed = parseGbaCheatLine(c.code);
+      if (parsed) this.codes.push({ code: c.code.trim().toUpperCase(), enabled: !!c.enabled, ...parsed });
+    }
   }
 }
 
@@ -253,5 +376,5 @@ function describeCheat(entry) {
   return what.join('; ');
 }
 
-if (typeof module !== 'undefined') module.exports = { CheatEngine, parseGameShark, parseGameGenie, CheatFinder, gsFreezeCode, describeCheat };
-if (typeof window !== 'undefined') window.PocketCheat = { CheatEngine, parseGameShark, parseGameGenie, CheatFinder, gsFreezeCode, describeCheat };
+if (typeof module !== 'undefined') module.exports = { CheatEngine, GbaCheatList, parseGameShark, parseGameGenie, parseGbaCheatLine, gbaCheatsFile, describeGbaCheat, CheatFinder, gsFreezeCode, describeCheat };
+if (typeof window !== 'undefined') window.PocketCheat = { CheatEngine, GbaCheatList, parseGameShark, parseGameGenie, parseGbaCheatLine, gbaCheatsFile, describeGbaCheat, CheatFinder, gsFreezeCode, describeCheat };

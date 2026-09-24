@@ -23,6 +23,8 @@ class PPU {
     this.bgRow = new Uint8Array(SCREEN_W);   // plain BG/window color per pixel (for final mix)
     this.sortedSprites = [];
     this._oamIds = [];             // scratch reused by _cleanOAM (no per-line alloc)
+    this._bgLUT = new Uint8Array(4);   // per-line 2-bit→shade tables (_compositeLine)
+    this._obLUT = new Uint8Array(8);
     this.frameReady = false;
     this.reset();
   }
@@ -239,14 +241,23 @@ class PPU {
     const yInTile = sy & 7;
     const rowOff = yInTile * 2;
     const row = this.row, bgRow = this.bgRow;
-    for (let x = startX; x < endX; x++) {
-      const col = ((x + sx) >> 3) & 31;
+    // Per-tile loop: map entry + tile-row bytes are fetched once per 8 pixels
+    // instead of once per pixel (the map/tile indices only change on tile
+    // boundaries). Identical output to the per-pixel version.
+    let x = startX;
+    while (x < endX) {
+      const xa = x + sx;
+      const col = (xa >> 3) & 31;
       const tile = vram[mapBase + topY + col];
       const addr = (signedTiles ? 0x1000 + (((tile << 24) >> 24) * 16) : tile * 16) + rowOff;
-      const bit = 7 - ((x + sx) & 7);
-      const color = (((vram[addr + 1] >> bit) & 1) << 1) | ((vram[addr] >> bit) & 1);
-      row[x] = color;
-      bgRow[x] = color;
+      const lo = vram[addr], hi = vram[addr + 1];
+      let bit = 7 - (xa & 7);
+      const tileEnd = (((xa | 7) + 1) - sx) < endX ? (((xa | 7) + 1) - sx) : endX;
+      for (; x < tileEnd; x++, bit--) {
+        const color = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
+        row[x] = color;
+        bgRow[x] = color;
+      }
     }
   }
 
@@ -274,6 +285,18 @@ class PPU {
 
     const bgp = this.bgp, obp0 = this.obp0, obp1 = this.obp1;
     const fb = this.framebuffer, row = this.row, bgRow = this.bgRow;
+    // Per-line 2-bit→shade LUTs: one array read per pixel instead of shift+mask.
+    const bgLUT = this._bgLUT;
+    bgLUT[0] = bgp & 3; bgLUT[1] = (bgp >> 2) & 3; bgLUT[2] = (bgp >> 4) & 3; bgLUT[3] = (bgp >> 6) & 3;
+    const obLUT = this._obLUT;
+    obLUT[0] = obp0 & 3; obLUT[1] = (obp0 >> 2) & 3; obLUT[2] = (obp0 >> 4) & 3; obLUT[3] = (obp0 >> 6) & 3;
+    obLUT[4] = obp1 & 3; obLUT[5] = (obp1 >> 2) & 3; obLUT[6] = (obp1 >> 4) & 3; obLUT[7] = (obp1 >> 6) & 3;
+    if (this.sortedSprites.length === 0) {
+      // No sprites on this line: no OBJ marks exist in row (it is fully
+      // rewritten every line), so the commit collapses to a BG shade lookup.
+      for (let x = 0; x < SCREEN_W; x++) fb[rowOff + x] = bgLUT[row[x] & 3];
+      return;
+    }
     for (let x = 0; x < SCREEN_W; x++) {
       const v = row[x];
       let shade;
@@ -281,12 +304,12 @@ class PPU {
         const color = v & 3;
         const bg = bgRow[x];
         if (color !== 0 && !(v & OBJ_PRIO && bg !== 0)) {
-          shade = ((v & 0x80) ? obp1 : obp0) >> (color * 2) & 3;
+          shade = obLUT[((v & 0x80) ? 4 : 0) | color];
         } else {
-          shade = (bgp >> (bg * 2)) & 3;
+          shade = bgLUT[bg];
         }
       } else {
-        shade = (bgp >> ((v & 3) * 2)) & 3;
+        shade = bgLUT[v & 3];
       }
       fb[rowOff + x] = shade;
     }
@@ -300,12 +323,17 @@ class PPU {
     // Reused across lines: a fresh [] here allocates 144 arrays per frame.
     const ids = this._oamIds;
     ids.length = 0;
+    // Keys are (x << 7) | index, unique per sprite, so insertion sort into the
+    // ≤10-element array beats Array.sort + comparator closure (144 calls/frame).
     for (let i = 0; i < 40 && ids.length < 10; i++) {
       const oy = oam[i * 4];
       if (y < oy - 16 || y >= oy - 16 + h) continue;
-      ids.push((oam[i * 4 + 1] << 7) | i);
+      const key = (oam[i * 4 + 1] << 7) | i;
+      let j = ids.length;
+      ids.push(key);
+      while (j > 0 && ids[j - 1] > key) { ids[j] = ids[j - 1]; j--; }
+      ids[j] = key;
     }
-    ids.sort((a, b) => a - b);
     for (let i = 0; i < ids.length; i++) ids[i] &= 0x7F;
     this.sortedSprites = ids;
   }
