@@ -27,6 +27,7 @@ let savTimer = null;
 let fps = 0;
 let linkHosting = 0; // port while hosting, 0 otherwise
 let linkConnected = false;
+let cheatsRebuilt = false; // GBA: persisted list applied to mGBA before the next boot
 
 // ---- elements ----
 const $ = (id) => document.getElementById(id);
@@ -60,9 +61,11 @@ input.onHotkey((action) => {
 // ---- link cable ----
 // Game Boy Printer: intercepts serial traffic when enabled (the printer and a
 // link peer are mutually exclusive — one device sits on the cable at a time).
+// GBA: the mGBA machine exposes no serial surface, so the printer stays off.
 let printerEnabled = false;
 let printer = null;
 function setPrinterEnabled(on) {
+  if (on && gb.isGba) { setStatus('printer is GB/GBC only — GBA has no link-cable printer'); return; }
   printerEnabled = on;
   if (on && window.GBPrinter) {
     printer = new GBPrinter();
@@ -248,7 +251,8 @@ function loop(t) {
   }
 
   // debugger run-to-breakpoint: emulate as fast as possible until PC hits one
-  if (dbgRunning) {
+  // (GB/CGB only — the mGBA machine exposes no single-step surface)
+  if (dbgRunning && !gb.isGba) {
     for (let i = 0; i < 120 && dbgRunning; i++) { // bounded per frame: UI stays alive
       const hit = gb._breakpoints && gb._breakpoints.has(gb.cpu.pc);
       if (hit) { dbgRunning = false; setStatus(`breakpoint $${gb.cpu.pc.toString(16).toUpperCase().padStart(4, '0')}`); break; }
@@ -281,7 +285,8 @@ function loop(t) {
     // Input echo trainer: the live player's mask feeds divergence tracking;
     // the strip renders the recording's inputs around the current position.
     let liveMask = window.PocketMovie.stateToMask(input.state);
-    if (ghost && ghost.active) {
+    if (ghost && ghost.active && !gb.isGba) { // ghost needs a second GB machine — GBA races unsupported
+      liveMask &= 0xFF; // GB machine mask: ignore GBA-only shoulder bits
       const gfb = ghost.step(liveMask);
       if (gfb) renderer.ghostFrame = gfb;
       const pct = $('ghost-progress');
@@ -320,7 +325,7 @@ function loop(t) {
   }
   rewind.update(t);
   practice.onFrame();
-  if (ra && ra.enabled) { ra.frame(gb); }
+  if (ra && ra.enabled && !gb.isGba) { ra.frame(gb); } // GBA: core memory is opaque, logic cannot evaluate
   renderInputDisplay();
 
   // debugger: a watchpoint fired mid-frame — pause and report where
@@ -426,6 +431,7 @@ $('heat-clear').addEventListener('click', () => { if (heatmap) { heatmap.reset()
 const ghost = window.PocketGhost ? new window.PocketGhost.GhostRacer(gb) : null;
 $('btn-ghost').addEventListener('click', () => {
   if (!romLoaded || !ghost) { setStatus('load a game first'); return; }
+  if (gb.isGba) { setStatus('ghost racer is GB/GBC only — it needs a second live machine'); return; }
   if (ghost.active || ghost.armed) {
     ghost.stop();
     renderer.ghostFrame = null;
@@ -461,7 +467,7 @@ $('btn-ghost').addEventListener('click', () => {
 
 // Race banner buttons: launch now from the anchor, or disarm entirely.
 $('ghost-startnow').addEventListener('click', () => {
-  if (!ghost || !ghost.waitingForReset) { setStatus('no ghost armed'); return; }
+  if (!ghost || !ghost.waitingForReset || gb.isGba) { setStatus('no ghost armed'); return; }
   const err = ghost.startNow();
   if (err) { setStatus(err); return; }
   $('ghost-startnow').textContent = 'restart';
@@ -557,7 +563,8 @@ async function raIdentifyCurrentRom() {
     ra.hardcore = true; // no save-state assists while hunting achievements
     ra.loadFromSession(res.hash, res.game, true);
     ra.pendingAwards.length = 0;
-    setStatus(`retroachievements: ${res.game.title} — ${res.game.achievements.length} achievements${ra.enabled ? '' : ' (none in core set)'}`);
+    if (gb.isGba) setStatus('retroachievements: GBA memory is not exposed by the mGBA build — logic cannot run this game');
+    else setStatus(`retroachievements: ${res.game.title} — ${res.game.achievements.length} achievements${ra.enabled ? '' : ' (none in core set)'}`);
   } catch { /* achievements never block play */ }
 }
 function raInit() {
@@ -570,8 +577,17 @@ function raInit() {
 raInit();
 
 // ---- debugger controls ----
+// The debugger drives the in-process GB CPU (step/breakpoints/disassembly).
+// GBA runs inside the mGBA wasm core, which exposes no debug APIs in this
+// vendored build — every handler reports that instead of silently doing
+// nothing on a stubbed cpu.mmu.
+function dbgAvailable() {
+  if (romLoaded && gb.isGba) { setStatus('debugger is GB/GBC only — the mGBA build exposes no GBA debug APIs'); return false; }
+  return true;
+}
 function dbgPause() { dbgRunning = false; setPaused(true); }
 function dbgStep(n = 1) {
+  if (!dbgAvailable()) return;
   dbgPause();
   for (let i = 0; i < n; i++) gb.stepInstruction();
   const fb = gb.ppu.colorFramebuffer || gb.ppu.framebuffer;
@@ -581,6 +597,7 @@ function dbgStep(n = 1) {
   if (typeof debug !== 'undefined' && debug) debug.render();
 }
 $('bp-add').addEventListener('click', () => {
+  if (!dbgAvailable()) return;
   const raw = ($('bp-input').value || '').replace(/^\$|0x/gi, '').trim();
   const v = parseInt(raw, 16);
   if (!Number.isFinite(v)) { setStatus('bad breakpoint address'); return; }
@@ -616,6 +633,7 @@ function renderWatchList() {
   if (!wps.length) el.textContent = 'no watchpoints';
 }
 $('wp-add').addEventListener('click', () => {
+  if (!dbgAvailable()) return;
   const v = parseHexAddr($('wp-input').value);
   if (v === null) { setStatus('bad watchpoint address'); return; }
   const kind = $('wp-kind').value;
@@ -629,6 +647,7 @@ $('wp-clear').addEventListener('click', () => { gb.clearWatchpoints(); renderWat
 $('dbg-step').addEventListener('click', () => dbgStep(1));
 $('dbg-step8').addEventListener('click', () => dbgStep(8));
 $('dbg-over').addEventListener('click', () => {
+  if (!dbgAvailable()) return;
   dbgPause();
   const t = window.PocketDebug.stepOverTarget(gb.cpu);
   if (t === null) { dbgStep(1); return; }
@@ -637,11 +656,12 @@ $('dbg-over').addEventListener('click', () => {
   setStatus('step over…');
 });
 $('dbg-out').addEventListener('click', () => {
+  if (!dbgAvailable()) return;
   dbgPause();
   const ret = window.PocketDebug.stepOutFrameReturn(gb.cpu);
   if (ret) { gb.addBreakpoint(ret); dbgRunning = true; setPaused(false); setStatus('step out…'); }
 });
-$('dbg-run').addEventListener('click', () => { dbgRunning = true; setPaused(false); setStatus('running to breakpoint…'); });
+$('dbg-run').addEventListener('click', () => { if (!dbgAvailable()) return; dbgRunning = true; setPaused(false); setStatus('running to breakpoint…'); });
 $('disasm-follow').addEventListener('click', () => {
   if (!debug) return;
   debug.followPc = !debug.followPc;
@@ -655,6 +675,7 @@ function setTurbo(on) {
   turbo = on;
   speed = on ? 4 : Number(elSpeed.value) || 1;
   elTurboBadge.classList.toggle('on', on);
+  if (gb.isGba && gb._gba) gb._gba.setFastForward(on ? 4 : 1); // mGBA native FF
 }
 function setRewinding(on) {
   rewinding = on && romLoaded;
@@ -705,31 +726,45 @@ async function loadRom(info) {
   if (moviePlayer) { moviePlayer.reset(); }
   if (movieRecorder && movieRecorder.recording) { movieRecorder.recording = false; $('btn-movie-rec').textContent = 'record movie'; }
   capture.resetHistory();
-  // authentic boot ROM (user-supplied dump), cached from a previous session
+  // GBA: mGBA runs commercial games without a BIOS (HLE boot). The per-user
+  // boot ROM setting only applies to GB/CGB.
   let bootBytes = null;
   try {
-    const b64 = await loadSetting('bootrom', null);
-    if (b64) bootBytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    if (info.kind !== 'gba') {
+      const b64 = await loadSetting('bootrom', null);
+      if (b64) bootBytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    }
   } catch { bootBytes = null; }
   gb.loadROM(romBytes, savData ? new Uint8Array(savData) : null, forceDmg, bootBytes);
+  if (info.kind === 'gba' && gb.attachGbaMachine) {
+    try {
+      await gb.attachGbaMachine();
+    } catch (err) {
+      setStatus('mGBA core failed to start: ' + (err && err.message ? err.message : err));
+      throw err;
+    }
+  }
   renderer.setSGB(gb.sgb || null);
-  heatmap = window.PocketHeat ? new window.PocketHeat.CartridgeHeatmap(gb.cart) : null;
+  // The heatmap samples MBC bank switches — GB/CGB only; the GBA machine's
+  // cart stub has no bankFor, and sampling it would throw every frame.
+  heatmap = (window.PocketHeat && !gb.isGba) ? new window.PocketHeat.CartridgeHeatmap(gb.cart) : null;
   romLoaded = true;
   paused = false;
   rewinding = false;
   $('btn-pause').textContent = 'pause';
   elRomName.textContent = (!titleLooksBroken(info.title) ? info.title : null) || info.name;
   showScreen(true);
-  bootChimePlayed = !!bootBytes; // chime only accompanies the generated animation
-  bootAnim = bootBytes ? null : new BootAnimation(gb.mmu.cgb); // no user boot ROM → generated intro
+  bootChimePlayed = true; // GBA runs the real intro; GB/CGB with a boot ROM likewise
+  bootAnim = (info.kind === 'gba' || bootBytes) ? null : new BootAnimation(gb.mmu.cgb); // generated intro only for BIOS-less GB
   audio.attach(gb.apu);
   audio.start();
   audio.setMuted(muted);
   startSavTimer();
   // load cheats saved for this game
   const saved = await loadSetting('cheats', []);
-  gb.cheats.restore(saved);
+  gb.cheats.restore(saved); // engine is GB or GBA flavor per the loaded machine (gameboy.js swaps it)
   renderCheatList();
+  if (gb.isGba) applyGbaCheats(); // machine is up with no sets: append-parses instantly, no reload
   // RetroAchievements: identify this ROM and arm the runtime (fire-and-forget;
   // a failed lookup never blocks loading)
   raIdentifyCurrentRom();
@@ -778,6 +813,28 @@ function flushSav() {
 // ---- reset / pause / mute ----
 function resetGame() {
   if (!romLoaded) return;
+  if (gb.isGba) {
+    // mGBA machine: quickReload re-runs the current ROM. Saves persist inside
+    // the mGBA FS and flush via the periodic save timer.
+    gb.reset();
+    // Cheat edits made while the machine was booting get picked up here.
+    if (cheatsRebuilt && gb._gba) { try { gb._gba.applyCheats(gb.cheats.serialize()); } catch { /* next boot */ } cheatsRebuilt = false; }
+    renderer.setSGB(null);
+    heatmap = null;
+    renderHeatmap();
+    rewind.reset();
+    if (ra && ra.enabled) ra.reset(); // new attempt: achievement progress restarts
+    practice.onReset();
+    if (ghost && ghost.waitingForReset) {
+      const err = ghost.startNow();
+      if (!err) {
+        $('ghost-progress').textContent = '0%';
+        $('ghost-pip-label').textContent = 'ghost';
+        setStatus('reset — ghost race started');
+      }
+    } else setStatus('reset');
+    return;
+  }
   const romBytes = gb.cart.rom;
   const sav = gb.cart.battery ? gb.cart.serializeSav() : null;
   // reuse the boot ROM the game was loaded with (gb._bootBytes) so an in-app
@@ -861,11 +918,19 @@ function practiceHotReset() {
 
 // ---- input display (practice panel + HUD; polled from the frame loop) ----
 const INPUT_LABELS = [['right', '→'], ['left', '←'], ['up', '↑'], ['down', '↓'], ['a', 'A'], ['b', 'B'], ['start', 'st'], ['select', 'se']];
+const INPUT_LABELS_GBA = [['l', 'L'], ['r', 'R']]; // shoulders: GBA only
 function renderInputDisplay() {
+  const isGba = gb.isGba;
+  const labels = isGba ? INPUT_LABELS.concat(INPUT_LABELS_GBA) : INPUT_LABELS;
   const box = $('prac-inputs');
   if (!box) return;
+  const wanted = labels.map(([key]) => key).join(',');
+  if (box.dataset.btns !== wanted) {
+    box.dataset.btns = wanted;
+    box.textContent = '';
+  }
   if (!box.children.length) {
-    for (const [key, label] of INPUT_LABELS) {
+    for (const [key, label] of labels) {
       const s = document.createElement('span');
       s.className = 'inkey'; s.dataset.btn = key; s.textContent = label;
       box.appendChild(s);
@@ -874,8 +939,12 @@ function renderInputDisplay() {
   for (const s of box.children) s.classList.toggle('on', !!input.state[s.dataset.btn]);
   const hud = $('hud-inputs');
   if (hud && practice.hudOn) {
+    if (hud.dataset.btns !== wanted) {
+      hud.dataset.btns = wanted;
+      hud.textContent = '';
+    }
     if (!hud.children.length) {
-      for (const [key, label] of INPUT_LABELS) {
+      for (const [key, label] of labels) {
         const s = document.createElement('span');
         s.className = 'inkey'; s.dataset.btn = key; s.textContent = label;
         hud.appendChild(s);
@@ -890,6 +959,7 @@ function setPaused(p) {
   $('btn-pause').textContent = p ? 'resume' : 'pause';
   // the ghost freezes/resumes with the game so the race stays in lockstep
   if (ghost) { if (p) ghost.pause(); else ghost.resume(); }
+  if (gb.isGba && gb._gba) gb._gba.setPaused(p); // mGBA drives its own loop
   if (!p) { audio.resume(); lastFrameTime = performance.now(); }
   else setStatus('paused');
 }
@@ -897,6 +967,7 @@ function setPaused(p) {
 function setMuted(m) {
   muted = m;
   if (!rewinding) audio.setMuted(m);
+  if (gb.isGba && gb._gba) gb._gba.setMuted(m); // mGBA owns GBA audio output
   $('btn-mute').textContent = m ? 'unmute' : 'mute';
 }
 
@@ -938,6 +1009,7 @@ async function showLibrary() {
   // leaving the playing view: drop any open overlay (menu, cheats, debug…)
   for (const o of document.querySelectorAll('.overlay.open')) o.classList.remove('open');
   debug.stop();
+  cheatsRebuilt = false;
   if (ghost) { ghost.stop(); renderer.ghostFrame = null; }
   const gstat = $('ghost-status'); if (gstat) gstat.classList.remove('on');
   const gpip2 = $('ghost-pip'); if (gpip2) gpip2.classList.remove('on');
@@ -1084,7 +1156,7 @@ function toggleOverlay(id) {
 function renderCheatList() {
   const list = $('cheat-list');
   list.textContent = '';
-  const describe = window.PocketCheat && window.PocketCheat.describeCheat;
+  const describe = window.PocketCheat && (gb.isGba ? window.PocketCheat.describeGbaCheat : window.PocketCheat.describeCheat);
   const cheats = gb.cheats.all();
   for (let i = 0; i < cheats.length; i++) {
     const c = cheats[i];
@@ -1101,10 +1173,10 @@ function renderCheatList() {
     top.appendChild(code);
     const toggle = document.createElement('button');
     toggle.textContent = c.enabled ? 'on' : 'off';
-    toggle.addEventListener('click', () => { gb.cheats.toggle(i); persistCheats(); renderCheatList(); });
+    toggle.addEventListener('click', () => { gb.cheats.toggle(i); persistCheats(); renderCheatList(); applyGbaCheats(); });
     const del = document.createElement('button');
     del.textContent = '×';
-    del.addEventListener('click', () => { gb.cheats.remove(i); persistCheats(); renderCheatList(); });
+    del.addEventListener('click', () => { gb.cheats.remove(i); persistCheats(); renderCheatList(); applyGbaCheats(); });
     top.appendChild(toggle); top.appendChild(del);
     row.appendChild(top);
     if (describe) {
@@ -1127,6 +1199,22 @@ function persistCheats() {
   saveSetting('cheats', gb.cheats.serialize());
 }
 
+// Push the cheat list into the running GBA machine. mGBA only reads its
+// .cheats file at boot, so a change re-boots the ROM inside the core with the
+// current frame round-tripped through a save state (byte-identical resume;
+// only mid-transfer hardware timing is not preserved). No-ops until the
+// machine is attached — the pending list is applied at boot instead.
+function applyGbaCheats() {
+  if (!gb.isGba) return;
+  if (!gb._gba) { cheatsRebuilt = true; return; }
+  cheatsRebuilt = false;
+  try {
+    const r = gb._gba.applyCheats(gb.cheats.serialize());
+    if (r === 'reloaded') setStatus('cheats applied — game reloaded at the same frame');
+    else if (r && r !== 'applied') setStatus(`cheats: ${r}`);
+  } catch (e) { setStatus('cheat apply failed: ' + (e && e.message || e)); }
+}
+
 function addCheat() {
   const inp = $('cheat-input');
   const err = $('cheat-err');
@@ -1138,10 +1226,11 @@ function addCheat() {
   inp.value = '';
   // Show what the new code does immediately — catches wrong-game codes at
   // paste time instead of after they've mangled a save.
-  const describe = window.PocketCheat && window.PocketCheat.describeCheat;
+  const describe = window.PocketCheat && (gb.isGba ? window.PocketCheat.describeGbaCheat : window.PocketCheat.describeCheat);
   if (describe) setStatus(describe(res));
   persistCheats();
   renderCheatList();
+  applyGbaCheats();
 }
 
 // ---- effects UI ----
@@ -1214,7 +1303,7 @@ function saveEffects() {
 }
 
 // ---- bindings UI ----
-const BTN_LABELS = { up: 'up', down: 'down', left: 'left', right: 'right', a: 'A', b: 'B', start: 'start', select: 'select' };
+const BTN_LABELS = { up: 'up', down: 'down', left: 'left', right: 'right', a: 'A', b: 'B', start: 'start', select: 'select', l: 'L', r: 'R' };
 let listeningBtn = null;
 
 function renderBinds() {
@@ -1309,11 +1398,14 @@ function applyPalette() {
 function resizeCanvas() {
   if (!elBezel.classList.contains('visible')) return;
   const rect = elCenter.getBoundingClientRect();
+  const isGba = romInfo && romInfo.kind === 'gba';
+  const w = isGba ? 240 : 160, h = isGba ? 160 : 144;
   const availW = rect.width - 24, availH = rect.height - 24;
   const fixed = Number(elScale.value) || 0;
-  const scale = fixed > 0 ? fixed : Math.max(1, Math.min(Math.floor(availW / 160), Math.floor(availH / 144)));
-  elCanvas.style.width = `${160 * scale}px`;
-  elCanvas.style.height = `${144 * scale}px`;
+  const scale = fixed > 0 ? fixed : Math.max(1, Math.min(Math.floor(availW / w), Math.floor(availH / h)));
+  elCanvas.style.width = `${w * scale}px`;
+  elCanvas.style.height = `${h * scale}px`;
+  if (renderer.setResolution) renderer.setResolution(w, h);
 }
 
 // ---- IPC wiring ----
@@ -1417,7 +1509,10 @@ $('clock-rate').addEventListener('change', () => {
 $('clock-day').addEventListener('click', () => setGameHour(6));
 $('clock-night').addEventListener('click', () => setGameHour(18));
 $('clock-noon').addEventListener('click', () => setGameHour(12));
-$('btn-cheats').addEventListener('click', () => toggleOverlay('ov-cheats'));
+$('btn-cheats').addEventListener('click', () => {
+  if (romLoaded && gb.isGba) setStatus('GBA cheats: GameShark/AR, CodeBreaker, and VBA codes — mGBA applies them');
+  toggleOverlay('ov-cheats');
+});
 $('btn-finder').addEventListener('click', () => toggleOverlay('ov-finder'));
 $('btn-effects').addEventListener('click', () => toggleOverlay('ov-effects'));
 $('btn-keys').addEventListener('click', () => toggleOverlay('ov-keys'));
@@ -1538,11 +1633,17 @@ $('btn-webm').addEventListener('click', () => {
   }
 });
 $('cheat-add').addEventListener('click', addCheat);
-$('cheat-clear').addEventListener('click', () => { gb.cheats.clear(); persistCheats(); renderCheatList(); });
+$('cheat-clear').addEventListener('click', () => { gb.cheats.clear(); persistCheats(); renderCheatList(); applyGbaCheats(); });
 $('cheat-close').addEventListener('click', () => toggleOverlay('ov-cheats'));
 
 // ---- cheat finder (RAM scanner → GameShark freeze) ----
-const finder = window.PocketCheat ? new window.PocketCheat.CheatFinder(() => gb.mmu) : null;
+// GB/CGB only: it scans the in-process MMU. The mGBA build exposes no memory
+// peek/poke, so a GBA scan would read an all-0xFF stub — gated with a message.
+let finder = window.PocketCheat ? new window.PocketCheat.CheatFinder(() => gb.mmu) : null;
+function finderAvailable() {
+  if (romLoaded && gb.isGba) { setStatus('cheat finder is GB/GBC only — GBA memory is not exposed by the mGBA build'); return false; }
+  return true;
+}
 function parseFinderValue(raw) {
   const s = String(raw || '').trim().toLowerCase();
   if (!s) return null;
@@ -1613,6 +1714,7 @@ function renderFinderWatches() {
 }
 setInterval(() => { if ($('ov-finder').classList.contains('open')) renderFinderWatches(); }, 250);
 $('finder-search').addEventListener('click', () => {
+  if (!finderAvailable()) return;
   if (!finder) return;
   const v = parseFinderValue($('finder-input').value);
   if (v === null) { const n = finder.search(null); setStatus(`search: all ${n} addresses (unknown init)`); renderFinderList(); return; }
@@ -1622,6 +1724,7 @@ $('finder-search').addEventListener('click', () => {
   renderFinderList();
 });
 $('finder-unknown').addEventListener('click', () => {
+  if (!finderAvailable()) return;
   if (!finder) return;
   const n = finder.search(null);
   setStatus(`search: all ${n} addresses (unknown init)`);
@@ -1634,6 +1737,7 @@ $('finder-narrow').addEventListener('click', () => {
   hint.style.display = show ? 'block' : 'none';
 });
 $('finder-apply').addEventListener('click', () => {
+  if (!finderAvailable()) return;
   if (!finder || !finder.candidates) { $('finder-err').textContent = 'search first'; return; }
   const op = $('finder-op').value;
   if (op === 'changed' || op === 'unchanged') {
@@ -1649,6 +1753,7 @@ $('finder-apply').addEventListener('click', () => {
   renderFinderList();
 });
 $('finder-reset').addEventListener('click', () => {
+  if (!finderAvailable()) return;
   if (!finder) return;
   finder.reset(); finder.watches = [];
   $('finder-list').textContent = 'no search yet';
@@ -1707,8 +1812,11 @@ window.addEventListener('drop', async (e) => {
     if (romFile) {
       const buf = await romFile.arrayBuffer();
       const bytes = new Uint8Array(buf);
-      if (bytes.length < 0x150) { setStatus('not a GB ROM'); return; }
-      const title = window.PocketTitle.extractRomTitle(bytes) || romFile.name;
+      const isGba = window.gbaHeaderValid && window.gbaHeaderValid(bytes);
+      if (!isGba && bytes.length < 0x150) { setStatus('not a supported GB/GBA ROM'); return; }
+      const title = isGba
+        ? (new TextDecoder().decode(bytes.subarray(0xA0, 0xAC)).replace(/\0/g, '').trim() || romFile.name)
+        : (window.PocketTitle.extractRomTitle(bytes) || romFile.name);
       const key = `drop-${hashName(romFile.name)}`;
       let patchBuf = null, patchName = null;
       if (patchFile) { patchBuf = await patchFile.arrayBuffer(); patchName = patchFile.name; }
@@ -1728,6 +1836,8 @@ window.addEventListener('drop', async (e) => {
         savePath: `${key}.sav`,
         statesDir: 'drop',
         statesKey: key,
+        kind: isGba ? 'gba' : 'gb',
+        bios: isGba ? await readBundledGbaBios() : null,
       });
       return;
     }
@@ -1735,8 +1845,11 @@ window.addEventListener('drop', async (e) => {
   const file = files[0];
   const buf = await file.arrayBuffer();
   const bytes = new Uint8Array(buf);
-  if (bytes.length < 0x150) { setStatus('not a GB ROM'); return; }
-  const title = window.PocketTitle.extractRomTitle(bytes) || file.name;
+  const isGba = window.gbaHeaderValid && window.gbaHeaderValid(bytes);
+  if (!isGba && bytes.length < 0x150) { setStatus('not a supported GB/GBA ROM'); return; }
+  const title = isGba
+    ? (new TextDecoder().decode(bytes.subarray(0xA0, 0xAC)).replace(/\0/g, '').trim() || file.name)
+    : (window.PocketTitle.extractRomTitle(bytes) || file.name);
   const key = `drop-${hashName(file.name)}`;
   await loadRom({
     name: file.name,
@@ -1745,8 +1858,18 @@ window.addEventListener('drop', async (e) => {
     savePath: `${key}.sav`,
     statesDir: 'drop',
     statesKey: key,
+    kind: isGba ? 'gba' : 'gb',
+    bios: isGba ? await readBundledGbaBios() : null,
   });
 });
+
+async function readBundledGbaBios() {
+  try {
+    const res = await fetch('app://bundle/gba_bios.bin');
+    if (!res.ok) return null;
+    return await res.arrayBuffer();
+  } catch { return null; }
+}
 
 function hashName(name) {
   let h = 0;
