@@ -18,7 +18,11 @@
     "appId": "app.pocketgb.emulator",
     "productName": "PocketGB",
     "publish": [
-      { "provider": "github", "owner": "pocketgb", "repo": "pocketgb" }
+      {
+        "provider": "github",
+        "owner": "pocketgb",
+        "repo": "pocketgb"
+      }
     ],
     "directories": {
       "output": "dist"
@@ -28,23 +32,37 @@
       "app.js",
       "index.html",
       "pocketgb-preload.js",
-      "src/**/*"
+      "src/**/*",
+      "vendor/**/*",
+      "gba_bios.bin",
+      "license.txt"
     ],
     "mac": {
       "category": "public.app-category.games",
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ]
     },
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "Game"
     }
   },
   "dependencies": {
+    "@thenick775/mgba-wasm": "^2.5.1",
     "electron-updater": "^6.8.9"
   },
   "devDependencies": {
