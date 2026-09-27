@@ -260,6 +260,17 @@
     .overlay .cheat .code { flex: 1; overflow: hidden; text-overflow: ellipsis; }
     .overlay .cheat.off .code { color: var(--text-soft); text-decoration: line-through; }
     .overlay .cheat button { background: none; border: 0; color: var(--text-soft); cursor: pointer; font: inherit; }
+    /* cheat-db results: one card per group, chevron button on the right */
+    .overlay .list .db-group {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--bg); border-radius: var(--radius); padding: 6px 9px;
+    }
+    .overlay .list .db-group .db-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .overlay .list .db-group .db-meta { color: var(--text-soft); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .overlay .list .db-group .db-lines { color: var(--text-soft); font-size: 10px; }
+    .overlay .list .db-group button { background: none; border: 0; color: var(--primary); cursor: pointer; font: inherit; font-size: 16px; padding: 0 4px; }
+    .overlay .list .db-group button:hover { color: var(--primary-hover); }
+    .overlay .list .db-group button.done { color: var(--success); cursor: default; font-size: 12px; }
     .overlay .cheat button:hover { color: var(--primary-hover); }
     .overlay .kv { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .overlay .kv .k { color: var(--text-soft); }
@@ -315,6 +326,22 @@
     #prac-inputs .inkey.on { background: var(--primary); color: #14121a; }
     .finder-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; }
     .finder-row.watch { color: var(--primary); }
+    /* save-state browser grid */
+    #states-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin: 8px 0; }
+    .state-tile { position: relative; display: flex; flex-direction: column; gap: 2px; background: var(--bg); border-radius: var(--radius); padding: 5px; }
+    .state-tile.clickable { cursor: pointer; }
+    .state-tile.clickable:hover { background: var(--bg-hover); }
+    .state-tile.resume { outline: 1px solid var(--primary); }
+    .state-tile .thumb { width: 100%; image-rendering: pixelated; border-radius: 2px; aspect-ratio: 10/9; object-fit: cover; background: #000; }
+    .state-tile .state-ph { width: 100%; aspect-ratio: 10/9; display: flex; align-items: center; justify-content: center; color: var(--text-soft); background: rgba(0,0,0,0.25); border-radius: 2px; }
+    .state-tile .state-cap { font-size: 9px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .state-tile .state-del {
+      position: absolute; top: 2px; right: 2px; display: none;
+      background: rgba(16, 12, 20, 0.85); border: 0; border-radius: 3px;
+      color: var(--text-soft); cursor: pointer; font: inherit; font-size: 10px; padding: 1px 5px;
+    }
+    .state-tile:hover .state-del { display: block; }
+    .state-tile .state-del:hover { color: #ff8f8f; }
     #finder-watches { margin-bottom: 6px; border-bottom: 1px solid #2a2430; padding-bottom: 6px; }
     .overlay .actions2 { display: flex; gap: 8px; }
     .overlay .actions2 .sbutton { flex: 1; }
@@ -384,8 +411,10 @@
           <div class="row">
             <button class="sbutton" id="cheat-add">add</button>
             <button class="sbutton" id="cheat-clear">clear all</button>
+            <button class="sbutton" id="cheat-db">find codes online…</button>
           </div>
           <div class="err" id="cheat-err"></div>
+          <div class="list" id="cheat-db-list" style="display:none"></div>
           <div class="list" id="cheat-list"></div>
           <div class="hint">GB/CGB: GameShark codes edit RAM — 01 + value + address, e.g. 010238CD writes 02 to CD38. Game Genie codes patch ROM (XXXYYY or XXXYYYZZZ with compare). GBA: GameShark/Pro Action Replay (XXXXXXXX XXXXXXXX), CodeBreaker (XXXXXXXX XXXX), or VBA raw writes (XXXXXXXX:YY) — applied by mGBA. Each code shows what it does underneath.</div>
           <div class="actions2"><button class="sbutton" id="cheat-close">close</button></div>
@@ -423,6 +452,7 @@
             <span class="hint">changed/unchanged compare against the previous scan — play a moment, then apply</span>
           </div>
           <div class="err" id="finder-err"></div>
+          <div class="hint hidden" id="finder-gba-note">GBA snapshot mode: the bundled mGBA core exposes no live memory access, so scans read save states — search, play, narrow until a few addresses remain. Freeze adds a VBA cheat code the core applies itself.</div>
           <div class="list" id="finder-list"></div>
           <div class="hint">search RAM while paused or playing, then narrow with changed/unchanged until a few addresses remain. freeze writes a real GameShark code into your cheat list.</div>
           <div class="actions2"><button class="sbutton" id="finder-close">close</button></div>
@@ -441,6 +471,13 @@
             <option value="off">off</option><option value="on">on</option></select></div>
           <div class="kv"><span class="k">screen curvature</span><select id="fx-curve">
             <option value="off">off</option><option value="on">on</option></select></div>
+          <div class="kv"><span class="k">built-in look</span>
+            <div class="row">
+              <select id="fx-builtin" style="width:auto">
+                <option value="">none</option>
+              </select>
+            </div>
+          </div>
           <div class="kv"><span class="k">shader pack</span>
             <div class="row">
               <button class="sbutton" id="fx-pack-load">load .pbg-fx…</button>
@@ -536,6 +573,18 @@
         </div>
       </div>
 
+      <!-- generic confirm (resume prompt + future yes/no asks) -->
+      <div class="overlay" id="ov-confirm">
+        <div class="box">
+          <h2 id="confirm-title">continue?</h2>
+          <div class="hint" id="confirm-text"></div>
+          <div class="actions2">
+            <button class="sbutton" id="confirm-yes">continue</button>
+            <button class="sbutton" id="confirm-no">cancel</button>
+          </div>
+        </div>
+      </div>
+
 
       <!-- screenshot gallery overlay -->
       <div class="overlay" id="ov-gallery">
@@ -545,6 +594,16 @@
           <div id="gal-film" class="list"></div>
           <div class="hint">The newest 100 shots per game are kept here. A shot can be set as the game's cover art in the library.</div>
           <div class="actions2"><button class="sbutton" id="gal-close">close</button></div>
+        </div>
+      </div>
+
+      <!-- save-state browser (visual slot grid) -->
+      <div class="overlay" id="ov-states">
+        <div class="box">
+          <h2 id="states-title">save states</h2>
+          <div id="states-grid"></div>
+          <div class="hint">Click a tile to load that state. ✕ deletes it. The resume tile is the automatic where-you-left-off save.</div>
+          <div class="actions2"><button class="sbutton" id="states-close">close</button></div>
         </div>
       </div>
 
@@ -588,6 +647,7 @@
       </select>
       <select class="sbutton" id="scale" title="Screen scale">
         <option value="0">fit window</option>
+        <option value="-1">fit (whole pixels)</option>
         <option value="1">1×</option>
         <option value="2">2×</option>
         <option value="3">3×</option>
@@ -626,7 +686,7 @@
           </div>
           <div class="cat-tile" id="cat-hardware" tabindex="0">
             <div class="cat-name">hardware</div>
-            <div class="cat-desc">link cable · clock · printer · boot rom</div>
+            <div class="cat-desc">link cable · clock · presence · stats</div>
           </div>
         </div>
         <div class="hint">tab = fast-forward · backspace = rewind · gamepad supported</div>
@@ -639,6 +699,7 @@
         <div class="more-grid">
           <button class="sbutton" id="btn-library">library</button>
           <button class="sbutton" id="btn-reset">reset</button>
+          <button class="sbutton" id="btn-states">save states…</button>
           <button class="sbutton" id="btn-practice">practice</button>
         </div>
         <div class="actions2">
@@ -668,6 +729,7 @@
         <div class="kv"><span class="k" style="cursor:pointer" id="back-capture">‹ menu</span><h2>capture</h2></div>
         <div class="more-grid">
           <button class="sbutton" id="btn-shot">screenshot</button>
+          <button class="sbutton" id="btn-replay">instant replay (F7)</button>
           <button class="sbutton" id="btn-gif">record gif</button>
           <button class="sbutton" id="btn-webm">record video</button>
           <button class="sbutton" id="btn-movie-rec">record movie</button>
@@ -689,10 +751,26 @@
           <button class="sbutton" id="btn-clock">game clock</button>
           <button class="sbutton" id="btn-printer">printer: off</button>
           <button class="sbutton" id="btn-bootrom">boot rom: off</button>
+          <button class="sbutton" id="btn-presence">presence: on</button>
         </div>
         <div class="actions2">
           <button class="sbutton" id="sub-hardware-back">back</button>
           <button class="sbutton" id="sub-hardware-close">close</button>
+        </div>
+      </div>
+
+      <!-- Discord presence + play-time panel -->
+      <div class="box hidden" id="presence-panel">
+        <div class="kv"><span class="k" style="cursor:pointer" id="presence-back">‹ menu</span><h2>presence &amp; play time</h2></div>
+        <div class="hint">Rich Presence for Discord — shows the game, session and total play time on your profile. Talks to a locally running Discord over its IPC pipe; no account access, nothing leaves your machine.</div>
+        <div class="row">
+          <button class="sbutton" id="presence-toggle">presence: on</button>
+          <button class="sbutton" id="presence-refresh">refresh</button>
+        </div>
+        <div class="hint" id="presence-status">off</div>
+        <div class="hint" id="presence-pt">no game loaded</div>
+        <div class="actions2">
+          <button class="sbutton" id="presence-close">close</button>
         </div>
       </div>
 
@@ -736,6 +814,7 @@
           <button class="sbutton" id="link-host">host</button>
           <button class="sbutton" id="link-join">join</button>
           <button class="sbutton" id="link-stop">disconnect</button>
+          <button class="sbutton" id="link-p2" title="Spawn a second PocketGB window and auto-connect the link cable">2-player setup</button>
         </div>
         <div class="hint" id="link-status">not connected</div>
         <div class="actions2">
@@ -759,6 +838,7 @@
 <script src="src/ui/debug.js"></script>
 <script src="src/ui/boot-animation.js"></script>
 <script src="src/ui/shader-pack.js"></script>
+<script src="src/ui/builtin-packs.js"></script>
 <script src="src/ui/audio.js"></script>
 <script src="src/core/cpu.js"></script>
 <script src="src/core/mmu.js"></script>
@@ -774,6 +854,7 @@
 <script src="src/core/joypad.js"></script>
 <script src="src/core/cartridge.js"></script>
 <script src="src/core/cheats.js"></script>
+<script src="src/core/cheatdb.js"></script>
 <script src="src/core/sgb.js"></script>
 <script src="src/core/debugger.js"></script>
 <script src="src/core/achievements.js"></script>
@@ -781,6 +862,7 @@
 <script src="src/core/heatmap.js"></script>
 <script src="src/core/serial.js"></script>
 <script src="src/core/gba-header.js"></script>
+<script src="src/core/mgba-state.js"></script>
 <!-- mGBA wasm core (ES module) → window.mGBA for the machine adapter.
      External file: inline scripts are blocked by the app CSP. -->
 <script type="module" src="src/core/mgba-loader.js"></script>
