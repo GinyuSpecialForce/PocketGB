@@ -56,7 +56,14 @@ input.onHotkey((action) => {
   else if (action === 'effects') toggleOverlay('ov-effects');
   else if (action === 'keys') { renderBinds(); toggleOverlay('ov-keys'); }
   else if (action === 'practice-reset') practiceHotReset();
+  else if (action === 'instant-replay') instantReplay();
 });
+// Instant replay: export the last 30s of play as a GIF with the button
+// presses burned in. History rolls all the time — nothing has to be armed.
+function instantReplay() {
+  if (!romLoaded) { setStatus('load a game first'); return; }
+  capture.replayGif(new PocketReplayInput());
+}
 
 // ---- link cable ----
 // Game Boy Printer: intercepts serial traffic when enabled (the printer and a
@@ -124,6 +131,18 @@ async function doLinkJoin() {
   updateLinkStatus();
   setStatus(host === '127.0.0.1' ? 'link joining…' : `link joining ${host}…`);
 }
+// 2-player setup: spawn a second PocketGB window with the same game and let
+// the two instances auto-connect over loopback (this side hosts, player 2
+// joins). The second window opens its own library → game — nothing else to
+// configure.
+$('link-p2').addEventListener('click', async () => {
+  if (!romLoaded) { setStatus('load a game first'); return; }
+  const res = await window.pocketgb.hubSpawn({ rom: romInfo.path, role: 'host' });
+  if (res && res.ok) setStatus(`player 2 window launched — link hosting on ${res.port}`);
+  else setStatus(`2-player setup failed: ${(res && res.error) || 'spawn error'}`);
+  updateLinkStatus();
+});
+
 function doLinkStop() {
   window.pocketgb.linkStop();
   linkHosting = 0;
@@ -312,20 +331,20 @@ function loop(t) {
     if (heatmap) heatmap.sample(gb.cpu.pc);
     const fb = gb.runFrame();
     if (movieRecorder.recording) {
-      movieRecorder.observe(window.PocketMovie.stateToMask(input.state));
+      movieRecorder.observe(liveMask);
     }
     if (fb) {
       framesThisSecond++;
       if (i === burst - 1) { // present the last frame of the burst
         renderer.blit(fb, gb.mmu.cgb);
         renderer.present();
-        capture.observe(fb, gb.mmu.cgb);
+        capture.observe(fb, gb.mmu.cgb, liveMask); // mask pairs the frame for instant replay
       }
     }
   }
   rewind.update(t);
   practice.onFrame();
-  if (ra && ra.enabled && !gb.isGba) { ra.frame(gb); } // GBA: core memory is opaque, logic cannot evaluate
+  if (ra && ra.enabled && gb.hasMemoryAccess) { ra.frame(gb); } // GBA: needs a memory-capable core
   renderInputDisplay();
 
   // debugger: a watchpoint fired mid-frame — pause and report where
@@ -678,7 +697,10 @@ function setTurbo(on) {
   if (gb.isGba && gb._gba) gb._gba.setFastForward(on ? 4 : 1); // mGBA native FF
 }
 function setRewinding(on) {
-  rewinding = on && romLoaded;
+  // GBA: no app-level rewind ring (snapshot cost stalled the loop — see
+  // loadRom); backspace simply does nothing instead of stuttering the game.
+  rewinding = on && romLoaded && !gb.isGba;
+  if (on && gb.isGba) setStatus('rewind is GB/CGB only — GBA states are too heavy to ring-buffer');
   // Rewinding time-travels the live machine; the ghost cannot follow its own
   // timeline backwards, so the attempt ends and re-arms (next reset relaunches).
   if (on && ghost && ghost.active) {
@@ -692,6 +714,86 @@ function setRewinding(on) {
 
 // ---- settings persistence (global + per-game) ----
 const PER_GAME_KEYS = ['palette', 'scale', 'effects', 'shaderPackPath'];
+// Resume-where-you-left-off: a per-game pointer to the newest state + the
+// wall-clock moment it was made. `resume.state` is a REAL save-state (same
+// format as slot files) refreshed by a timer, save/load, quit, and library
+// exit — any of which may be the last thing that happens before the app goes
+// away, so no single signal has to be reliable for resume to stay fresh.
+const RESUME_SLOT = 'resume';
+function resumePath() { return statePath(RESUME_SLOT); }
+let resumeTimer = null;
+function saveResumePoint(quiet) {
+  if (!romLoaded || !romInfo) return;
+  try {
+    const bytes = gb.saveState();
+    if (!bytes || !bytes.length) return;
+    window.pocketgb.writeState(resumePath(), bytes, makeThumbnail());
+    saveSetting('resumeAt', Date.now());
+    if (!quiet) setStatus('resume point saved');
+  } catch (e) {
+    // Expected on GBA boots before the core's first completed frame
+    // (forceAutoSaveState refuses) — staying quiet keeps boot logs honest.
+    if (!quiet) setStatus('resume point failed: ' + (e && e.message || e));
+  }
+}
+function startResumeTimer() {
+  stopResumeTimer();
+  // GBA states are heavy to make (~17-150ms stall — measured on the mGBA wasm
+  // core), so the rolling resume point refreshes every 2 min there instead of
+  // every 30s; manual saves/reset/quit still park one immediately.
+  const every = (typeof gb !== 'undefined' && gb.isGba) ? 120000 : 30000;
+  resumeTimer = setInterval(() => saveResumePoint(true), every);
+}
+function stopResumeTimer() { if (resumeTimer) { clearInterval(resumeTimer); resumeTimer = null; } }
+
+// ---- play-time stats + Discord presence (accounted in the main process) ----
+// The renderer only reports RUNNING: loaded, unpaused and focused. Wall-clock
+// accrual, persistence and the Discord pipe all live in main.js — a stalled
+// or devtools-paused renderer can only UNDERCOUNT play time, never inflate it.
+let playtimeTimer = null;
+function startPlaytimeTicker() {
+  stopPlaytimeTicker();
+  playtimeTimer = setInterval(() => {
+    if (romLoaded && !paused && !document.hidden) window.pocketgb.playtimeTick(1);
+  }, 1000);
+}
+function stopPlaytimeTicker() { if (playtimeTimer) { clearInterval(playtimeTimer); playtimeTimer = null; } }
+// Compact total for captions, matching the main process's fmtPlaytime shape.
+function fmtLibPlaytime(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds || 0));
+  if (s < 60) return `${s}s played`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m played`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h ${m % 60}m played` : `${h}h played`;
+}
+async function resumeIfAvailable() {
+  const at = await loadSetting('resumeAt', 0);
+  if (!at) return false; // never played (or resume declined last time)
+  const data = await window.pocketgb.readState(resumePath());
+  if (!data) return false; // pointer without a file (cleaned up) — play fresh
+  const min = Math.round((Date.now() - at) / 60000);
+  setPaused(true); // don't let the run advance while the player decides
+  showConfirm(
+    'jump back in?',
+    `This game has a save from ${min === 0 ? 'less than a minute' : `${min} minute${min === 1 ? '' : 's'}`} ago.` +
+      ' Continue where you left off, or start from the beginning?',
+    'continue',
+    async () => {
+      setPaused(false);
+      try {
+        gb.loadState(new Uint8Array(data));
+        rewind.reset();
+        setStatus('resumed where you left off');
+      } catch (err) {
+        setStatus(`resume failed — fresh start (${err && err.message || err})`);
+      }
+      saveResumePoint(true);
+    },
+    () => { setPaused(false); saveSetting('resumeAt', 0); setStatus('starting fresh'); },
+  );
+  return true;
+}
 function settingsKey(key) { return romInfo ? `game:${romInfo.statesKey}:${key}` : `global:${key}`; }
 
 async function loadSetting(key, fallback) {
@@ -748,6 +850,13 @@ async function loadRom(info) {
   // The heatmap samples MBC bank switches — GB/CGB only; the GBA machine's
   // cart stub has no bankFor, and sampling it would throw every frame.
   heatmap = (window.PocketHeat && !gb.isGba) ? new window.PocketHeat.CartridgeHeatmap(gb.cart) : null;
+  // Rewind snapshots on GBA (mGBA saveState ≈ 500KB + 17ms): the 600-state
+  // ring plus the snapshot churn caused a periodic judder (~85ms/s stalled).
+  // The core also keeps its own limited rewind (mGBA F-key equivalent); the
+  // app's backspace rewind is a GB/CGB feature until the core is leaner.
+  rewind.reset();
+  rewind.setRewindable(!gb.isGba);
+  retargetFinder();
   romLoaded = true;
   paused = false;
   rewinding = false;
@@ -765,6 +874,9 @@ async function loadRom(info) {
   gb.cheats.restore(saved); // engine is GB or GBA flavor per the loaded machine (gameboy.js swaps it)
   renderCheatList();
   if (gb.isGba) applyGbaCheats(); // machine is up with no sets: append-parses instantly, no reload
+  startResumeTimer();
+  startPlaytimeTicker(); // presence + play time are main-process owned; just report RUNNING
+  resumeIfAvailable(); // fire-and-forget: the prompt must never block loading
   // RetroAchievements: identify this ROM and arm the runtime (fire-and-forget;
   // a failed lookup never blocks loading)
   raIdentifyCurrentRom();
@@ -813,6 +925,7 @@ function flushSav() {
 // ---- reset / pause / mute ----
 function resetGame() {
   if (!romLoaded) return;
+  saveResumePoint(true); // reset is the new "latest moment" — park it before rewinding time
   if (gb.isGba) {
     // mGBA machine: quickReload re-runs the current ROM. Saves persist inside
     // the mGBA FS and flush via the periodic save timer.
@@ -962,6 +1075,7 @@ function setPaused(p) {
   if (gb.isGba && gb._gba) gb._gba.setPaused(p); // mGBA drives its own loop
   if (!p) { audio.resume(); lastFrameTime = performance.now(); }
   else setStatus('paused');
+  window.pocketgb.playtimePause(p); // presence flips to "paused", partial tick flushes
 }
 
 function setMuted(m) {
@@ -989,6 +1103,7 @@ function makeThumbnail() {
 function doSaveState(slot) {
   if (!romLoaded) return;
   window.pocketgb.writeState(statePath(slot), gb.saveState(), makeThumbnail());
+  saveResumePoint(true); // manual save = the freshest resume point too
   setStatus(`state ${slot} saved`);
 }
 async function doLoadState(slot) {
@@ -998,9 +1113,132 @@ async function doLoadState(slot) {
   try {
     gb.loadState(new Uint8Array(data));
     rewind.reset();
+    saveResumePoint(true);
     setStatus(`state ${slot} loaded`);
   } catch (err) {
     setStatus(`load failed: ${err.message}`);
+  }
+}
+
+// ---- visual state browser (thumbnail grid over the state files) ----
+// Generic two-button confirm (resume prompt + any future yes/no ask). One
+// overlay, handlers swapped per call — the delete confirm keeps its own
+// dedicated overlay since its wording is built per-mode.
+let confirmHandlers = null;
+function showConfirm(title, text, yesLabel, onYes, onNo) {
+  confirmHandlers = { onYes, onNo };
+  $('confirm-title').textContent = title;
+  $('confirm-text').textContent = text;
+  $('confirm-yes').textContent = yesLabel;
+  $('ov-confirm').classList.add('open');
+}
+function closeConfirm(accepted) {
+  const h = confirmHandlers;
+  confirmHandlers = null;
+  $('ov-confirm').classList.remove('open');
+  if (h) { try { (accepted ? h.onYes : h.onNo || (() => {}))(); } catch (e) { setStatus(String(e && e.message || e)); } }
+}
+let browserTarget = null; // { running: true } | { key, title } — running game vs library card
+function openStateBrowser(entry) {
+  if (!entry && !romLoaded) { setStatus('load a game first'); return; }
+  browserTarget = entry || { running: true };
+  $('ov-states').classList.add('open');
+  renderStateBrowser();
+}
+function closeStateBrowser() {
+  browserTarget = null;
+  $('ov-states').classList.remove('open');
+}
+async function renderStateBrowser() {
+  const grid = $('states-grid');
+  const title = $('states-title');
+  if (!browserTarget) { grid.textContent = ''; return; }
+  // Running game: slots 0-9 + the live resume point. Library card: the
+  // game's files by key, resume excluded (its confirm prompt owns it).
+  const running = !!browserTarget.running;
+  const key = running ? romInfo.statesKey : browserTarget.key;
+  const states = await window.pocketgb.listStates(key);
+  let resumeEntry = null;
+  if (running) {
+    for (let i = 0; i <= 9; i++) if (!states.some((s) => s.slot === i)) states.push({ slot: i, empty: true });
+    states.sort((a, b) => a.slot - b.slot);
+    title.textContent = `save states — ${elRomName.textContent}`;  // The resume point is not in listStates (it isn't a numbered slot); its
+  // age comes from the resumeAt setting, fresher than any file mtime.
+    const at = await loadSetting('resumeAt', 0);
+    const thumbB64 = at ? await window.pocketgb.readThumbnail(`${key}.${RESUME_SLOT}.state`) : null;
+    if (at && thumbB64) resumeEntry = { file: `${key}.${RESUME_SLOT}.state`, hasThumb: true, mtime: at };
+    window.pocketgb.playtimeGet(key).then((pt) => {
+      if (browserTarget && browserTarget.running) title.textContent = `save states — ${elRomName.textContent} · ${fmtLibPlaytime(pt.total)}`;
+    });
+  } else {
+    title.textContent = `save states — ${browserTarget.title}`;
+  }
+  renderStateGrid(grid, states, resumeEntry);
+}
+function fmtAge(ms) {
+  const m = Math.round(ms / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  if (h < 24) return rm ? `${h}h ${rm}m ago` : `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? 'yesterday' : `${d} days ago`;
+}
+function renderStateGrid(grid, states, resumeEntry) {
+  grid.textContent = '';
+  const mkTile = () => { const t = document.createElement('div'); t.className = 'state-tile'; return t; };
+  const mkCap = (t) => { const c = document.createElement('div'); c.className = 'state-cap'; c.textContent = t; return c; };
+  // The live resume point leads the grid (running game only).
+  if (resumeEntry && resumeEntry.hasThumb) {
+    const tile = mkTile();
+    tile.classList.add('resume');
+    const img = document.createElement('img');
+    img.className = 'thumb';
+    window.pocketgb.readThumbnail(resumeEntry.file).then((b64) => { if (b64) img.src = `data:image/png;base64,${b64}`; });
+    tile.appendChild(img);
+    tile.appendChild(mkCap(`resume · ${fmtAge(resumeEntry.mtime)}`));
+    grid.appendChild(tile);
+  }
+  for (const s of states) {
+    const tile = mkTile();
+    if (s.hasThumb) {
+      const img = document.createElement('img');
+      img.className = 'thumb';
+      window.pocketgb.readThumbnail(s.file).then((b64) => { if (b64) img.src = `data:image/png;base64,${b64}`; });
+      tile.appendChild(img);
+    } else {
+      const ph = document.createElement('div');
+      ph.className = 'state-ph';
+      ph.textContent = s.empty ? '·' : '?';
+      tile.appendChild(ph);
+    }
+    tile.appendChild(mkCap(s.empty ? `slot ${s.slot} — empty` : `slot ${s.slot} · ${fmtAge(s.mtime)}`));
+    // Running game: click loads. Library: the tile is informational; delete
+    // removes bytes + thumbnail in both modes.
+    if (!s.empty) {
+      if (browserTarget.running) {
+        tile.classList.add('clickable');
+        tile.title = 'load this state';
+        tile.addEventListener('click', () => { doLoadState(s.slot); closeStateBrowser(); });
+      }
+      const del = document.createElement('button');
+      del.className = 'state-del';
+      del.textContent = '✕';
+      del.title = 'delete this state';
+      del.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await window.pocketgb.deleteState(s.file);
+        renderStateBrowser();
+      });
+      tile.appendChild(del);
+    }
+    grid.appendChild(tile);
+  }
+  if (!grid.children.length) {
+    const d = document.createElement('div');
+    d.className = 'empty';
+    d.textContent = 'no save states yet';
+    grid.appendChild(d);
   }
 }
 
@@ -1010,6 +1248,10 @@ async function showLibrary() {
   for (const o of document.querySelectorAll('.overlay.open')) o.classList.remove('open');
   debug.stop();
   cheatsRebuilt = false;
+  if (romLoaded) saveResumePoint(true); // park the run before the game card takes over
+  stopResumeTimer();
+  startPlaytimeTicker(); // library mode still counts: this game stays "running"
+  browserTarget = null;
   if (ghost) { ghost.stop(); renderer.ghostFrame = null; }
   const gstat = $('ghost-status'); if (gstat) gstat.classList.remove('on');
   const gpip2 = $('ghost-pip'); if (gpip2) gpip2.classList.remove('on');
@@ -1058,9 +1300,20 @@ async function showLibrary() {
     galBtn.title = 'Screenshot gallery';
     galBtn.addEventListener('click', (e) => { e.stopPropagation(); openGallery(r); });
     actions.appendChild(galBtn);
+    // hoisted above the buttons that branch on it
+    const key = statesKeyFor(r.path);
+    if (key) {
+      const stBtn = document.createElement('button');
+      stBtn.textContent = 'states';
+      stBtn.title = 'Browse this game\'s save states (with thumbnails)';
+      stBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openStateBrowser({ key, title: (!titleLooksBroken(r.title) ? r.title : null) || basenameOf(r.path) });
+      });
+      actions.appendChild(stBtn);
+    }
     card.appendChild(actions);
     // cover art: user-chosen screenshot first, else newest save-state thumbnail
-    const key = statesKeyFor(r.path);
     let thumbB64 = key ? await window.pocketgb.readCover(r.path, key) : null;
     // (custom cover present — the card shows it directly; no state fallback)
     if (!thumbB64 && key) {
@@ -1085,6 +1338,18 @@ async function showLibrary() {
     label.className = 'label';
     label.textContent = (!titleLooksBroken(r.title) ? r.title : null) || basenameOf(r.path);
     card.appendChild(label);
+    if (key) {
+      // play-time badge: total from the main-process tracker (adds itself to
+      // the tick while this game is the live one)
+      window.pocketgb.playtimeGet(key).then((pt) => {
+        if (pt && pt.total > 0) {
+          const tag = document.createElement('div');
+          tag.className = 'playtime';
+          tag.textContent = fmtLibPlaytime(pt.total);
+          card.appendChild(tag);
+        }
+      });
+    }
     elLibGrid.appendChild(card);
   }
 }
@@ -1148,7 +1413,7 @@ function toggleOverlay(id) {
   for (const o of document.querySelectorAll('.overlay')) o.classList.remove('open');
   if (open) {
     el.classList.add('open');
-    if (id === 'ov-cheats') renderCheatList();
+    if (id === 'ov-cheats') { renderCheatList(); cheatDbOpen = false; $('cheat-db-list').style.display = 'none'; }
     if (id === 'ov-keys') renderBinds();
   }
 }
@@ -1220,23 +1485,163 @@ function addCheat() {
   const err = $('cheat-err');
   const text = inp.value.trim();
   if (!text) return;
+  // Multi-line paste support: one blob in → one code per line out (semicolons
+  // count as separators too). The db-import flow uses the same splitter.
+  let lines = null;
+  if (/[\r\n;]/.test(text) && window.PocketCheatDb) {
+    try { lines = window.PocketCheatDb.splitCheatLines(text); } catch { lines = null; }
+  }
+  const describe = window.PocketCheat && (gb.isGba ? window.PocketCheat.describeGbaCheat : window.PocketCheat.describeCheat);
+  if (lines && lines.length > 1) {
+    const r = window.PocketCheatDb.importCheatLines(gb.cheats, lines);
+    inp.value = '';
+    if (!r.added) {
+      err.textContent = r.firstError || 'none of those lines parsed as a cheat code';
+      return;
+    }
+    err.textContent = '';
+    setStatus(`added ${r.added} cheat${r.added === 1 ? '' : 's'}` +
+      (r.skipped ? ` — ${r.skipped} line${r.skipped === 1 ? '' : 's'} skipped: ${r.firstError || ''}` : ''));
+    persistCheats();
+    renderCheatList();
+    applyGbaCheats();
+    return;
+  }
   const res = gb.cheats.add(text);
   if (res.error) { err.textContent = res.error; return; }
   err.textContent = '';
   inp.value = '';
   // Show what the new code does immediately — catches wrong-game codes at
   // paste time instead of after they've mangled a save.
-  const describe = window.PocketCheat && (gb.isGba ? window.PocketCheat.describeGbaCheat : window.PocketCheat.describeCheat);
   if (describe) setStatus(describe(res));
   persistCheats();
   renderCheatList();
   applyGbaCheats();
 }
 
+// ---- cheat database lookup (gamehacking.org) ----
+// Fetches from the main process (COEP blocks off-origin fetch here), matches
+// the ROM by GH's full-file CRC32 (region-exact when it hits), lists code
+// groups, and imports a group one click at a time — no bulk dumps.
+let cheatDbOpen = false;
+function ghSys() { return gb.isGba ? 'gba' : (gb.mmu && gb.mmu.cgb ? 'gbc' : 'gb'); }
+function ghCrcHex() {
+  const rom = gb.cart && gb.cart.rom;
+  return rom && window.PocketCheatDb ? window.PocketCheatDb.crc32Hex(rom) : null;
+}
+async function cheatDbLookup() {
+  const list = $('cheat-db-list');
+  const err = $('cheat-err');
+  err.textContent = '';
+  if (!romLoaded) { setStatus('load a game first'); return; }
+  cheatDbOpen = true;
+  list.style.display = '';
+  list.textContent = 'searching gamehacking.org…';
+  const title = (romInfo && (!titleLooksBroken(romInfo.title) ? romInfo.title : null)) || romInfo.name;
+  const q = title.replace(/\s*\([^)]*\)\s*/g, ' ')           // strip "(USA)" etc
+    .replace(/\s*\[[^\]]*\]\s*/g, ' ')                        // strip "[!]" etc
+    .replace(/[,._\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const res = await window.pocketgb.cheatDbSearch(ghSys(), q, ghCrcHex());
+  if (!cheatDbOpen) return; // overlay closed while fetching
+  if (!res.ok) { list.textContent = `lookup failed: ${res.error}`; return; }
+  if (!res.games.length) {
+    list.innerHTML = '';
+    const d = document.createElement('div');
+    d.className = 'hint';
+    d.textContent = `no gamehacking.org page found for "${q}"`;
+    list.appendChild(d);
+    return;
+  }
+  if (res.exactCrc) {
+    // CRC matched one version: skip the pick-a-game step entirely.
+    return cheatDbShowGame(res.games[0]);
+  }
+  list.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'hint';
+  head.textContent = 'several versions match — pick one (CRC32 makes the right region a one-click check):';
+  list.appendChild(head);
+  for (const g of res.games.slice(0, 12)) {
+    const row = document.createElement('div');
+    row.className = 'db-group';
+    const t = document.createElement('span');
+    t.className = 'db-title';
+    t.textContent = `${g.game} — ${g.version}`;
+    const meta = document.createElement('span');
+    meta.className = 'db-meta';
+    meta.textContent = `${g.crc || 'no crc'} · ${g.codes} code${g.codes === 1 ? '' : 's'}`;
+    const btn = document.createElement('button');
+    btn.className = 'sbutton';
+    btn.textContent = 'codes';
+    btn.addEventListener('click', () => cheatDbShowGame(g));
+    row.appendChild(t); row.appendChild(meta); row.appendChild(btn);
+    list.appendChild(row);
+  }
+}
+async function cheatDbShowGame(g) {
+  const list = $('cheat-db-list');
+  const err = $('cheat-err');
+  list.textContent = `loading codes for ${g.game} (${g.version})…`;
+  const res = await window.pocketgb.cheatDbCodes(g.gamId);
+  if (!cheatDbOpen) return;
+  if (!res.ok) { list.textContent = `lookup failed: ${res.error}`; return; }
+  err.textContent = '';
+  list.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'hint';
+  head.textContent = `${g.game} — ${g.version} · ${res.groups.length} group${res.groups.length === 1 ? '' : 's'} · from gamehacking.org`;
+  list.appendChild(head);
+  if (!res.groups.length) {
+    const d = document.createElement('div');
+    d.className = 'hint';
+    d.textContent = 'no codes on that page';
+    list.appendChild(d);
+    return;
+  }
+  for (const grp of res.groups) {
+    const row = document.createElement('div');
+    row.className = 'db-group';
+    const t = document.createElement('span');
+    t.className = 'db-title';
+    t.textContent = grp.title;
+    const meta = document.createElement('span');
+    meta.className = 'db-meta';
+    meta.textContent = [grp.device, grp.hackers && grp.hackers.length ? `by ${grp.hackers.slice(0, 2).join(', ')}` : null]
+      .filter(Boolean).join(' · ');
+    const lines = document.createElement('span');
+    lines.className = 'db-lines';
+    lines.textContent = `${grp.lines.length} line${grp.lines.length === 1 ? '' : 's'}`;
+    const btn = document.createElement('button');
+    btn.title = grp.lines.join('\n');
+    btn.textContent = '+';
+    btn.addEventListener('click', () => {
+      const r = window.PocketCheatDb.importCheatLines(gb.cheats, grp.lines);
+      if (!r.added) {
+        err.textContent = r.firstError || 'import failed';
+        return;
+      }
+      err.textContent = '';
+      btn.textContent = 'added';
+      btn.classList.add('done');
+      btn.disabled = true;
+      setStatus(`imported "${grp.title}" (${r.added} line${r.added === 1 ? '' : 's'})`);
+      persistCheats();
+      renderCheatList();
+      applyGbaCheats();
+    });
+    row.appendChild(t); row.appendChild(meta); row.appendChild(lines); row.appendChild(btn);
+    list.appendChild(row);
+  }
+}
+
 // ---- effects UI ----
 // Shader pack state: the parsed pack (or null = built-in LCD shader) plus the
 // file path it came from (for per-pack persistence + hot reload).
 let shaderPackPath = null;
+// Built-in look packs ship in the .pbg-fx format and ride the exact same
+// parse → compile → apply path as file packs. `shaderPackPath` stays null
+// for them; the chosen pack NAME is persisted per-game instead.
+let builtinPackChoice = null; // pack name or null
 async function applyShaderPackFromText(text, path, quiet) {
   const parsed = window.PocketShaderPack.parseShaderPack(text);
   if (parsed.error) {
@@ -1247,9 +1652,12 @@ async function applyShaderPackFromText(text, path, quiet) {
   $('fx-pack-err').textContent = '';
   renderer.setShaderPack(parsed);
   shaderPackPath = path || null;
+  builtinPackChoice = null; // a file pack supersedes any built-in look
   if (!fxOn()) $('fx-shader').value = 'on'; // a pack only shows with the shader enabled
   saveEffects();
   saveSetting('shaderPackPath', shaderPackPath);
+  saveSetting('builtinPack', null);
+  syncBuiltinSelect();
   if (!quiet) setStatus(`shader pack: ${parsed.name}`);
   return true;
 }
@@ -1261,12 +1669,58 @@ function clearShaderPack(quiet) {
   if (!quiet) setStatus('shader pack cleared — built-in LCD shader');
 }
 function fxOn() { return $('fx-shader').value === 'on'; }
+// Populate the built-in-look dropdown from the catalog.
+function initBuiltinSelect() {
+  const sel = $('fx-builtin');
+  for (const opt of [...sel.querySelectorAll('option')]) if (opt.value) opt.remove();
+  for (const p of window.PocketBuiltinPacks.BUILTIN_SHADER_PACKS) {
+    const o = document.createElement('option');
+    o.value = p.name;
+    o.textContent = p.name;
+    sel.appendChild(o);
+  }
+  sel.addEventListener('change', onBuiltinSelect);
+  syncBuiltinSelect();
+}
+function syncBuiltinSelect() {
+  $('fx-builtin').value = builtinPackChoice || '';
+}
+async function onBuiltinSelect() {
+  const name = $('fx-builtin').value || null;
+  if (!name) {
+    builtinPackChoice = null;
+    renderer.setShaderPack(null); // back to the built-in LCD shader
+    saveSetting('builtinPack', null);
+    setStatus('built-in LCD shader');
+    return;
+  }
+  const pack = window.PocketBuiltinPacks.BUILTIN_SHADER_PACKS.find((p) => p.name === name);
+  if (!pack) return;
+  const text = JSON.stringify(pack.json);
+  const ok = await applyShaderPackFromText(text, null);
+  if (ok) {
+    // applyShaderPackFromText nulls the choice; restore it — this IS the source.
+    builtinPackChoice = name;
+    saveSetting('builtinPack', name);
+    syncBuiltinSelect();
+  } else {
+    syncBuiltinSelect();
+  }
+}
 async function loadSavedShaderPack() {
   const p = await loadSetting('shaderPackPath', null);
-  if (!p || !window.pocketgb.readShaderPack) return;
-  const res = await window.pocketgb.readShaderPack(p);
-  if (res && res.ok) await applyShaderPackFromText(res.text, p, true);
-  else if (res && res.error) $('fx-pack-err').textContent = `saved pack unavailable: ${res.error}`;
+  if (p && window.pocketgb.readShaderPack) {
+    const res = await window.pocketgb.readShaderPack(p);
+    if (res && res.ok) { await applyShaderPackFromText(res.text, p, true); return; }
+    if (res && res.error) $('fx-pack-err').textContent = `saved pack unavailable: ${res.error}`;
+  }
+  // no file pack: fall back to the persisted built-in look, if any
+  const name = await loadSetting('builtinPack', null);
+  if (name && window.PocketBuiltinPacks.BUILTIN_SHADER_PACKS.some((x) => x.name === name)) {
+    const pack = window.PocketBuiltinPacks.BUILTIN_SHADER_PACKS.find((x) => x.name === name);
+    const ok = await applyShaderPackFromText(JSON.stringify(pack.json), null, true);
+    if (ok) { builtinPackChoice = name; syncBuiltinSelect(); }
+  }
 }
 $('fx-pack-load').addEventListener('click', async () => {
   const res = await window.pocketgb.openShaderPack();
@@ -1283,6 +1737,7 @@ if (window.pocketgb.onShaderPackChanged) {
 }
 
 async function initEffects() {
+  initBuiltinSelect();
   const fx = await loadSetting('effects', { ghosting: false, scanlines: false, shader: false, curvature: false });
   $('fx-ghost').value = fx.ghosting ? 'on' : 'off';
   $('fx-scan').value = fx.scanlines ? 'on' : 'off';
@@ -1395,6 +1850,11 @@ function applyPalette() {
 }
 
 // ---- resize (fit or fixed scale) ----
+// GBA's 240×160 is a 3:2 aspect (GB is 10:9), so "fit window" fills whatever
+// the window gives it — fine for CSS pixelated scaling, but on HiDPI or
+// fractional window sizes LCD cells land on half device pixels. "fit (whole
+// pixels)" scales by DEVICE pixels (DPR-aware) so every LCD cell is an exact
+// whole number of physical pixels — the pixel-perfect option.
 function resizeCanvas() {
   if (!elBezel.classList.contains('visible')) return;
   const rect = elCenter.getBoundingClientRect();
@@ -1402,7 +1862,18 @@ function resizeCanvas() {
   const w = isGba ? 240 : 160, h = isGba ? 160 : 144;
   const availW = rect.width - 24, availH = rect.height - 24;
   const fixed = Number(elScale.value) || 0;
-  const scale = fixed > 0 ? fixed : Math.max(1, Math.min(Math.floor(availW / w), Math.floor(availH / h)));
+  let scale;
+  if (fixed > 0) {
+    scale = fixed;
+  } else if (fixed === -1) {
+    const dpr = window.devicePixelRatio || 1;
+    // largest integer css-scale whose device-pixel size is still a whole
+    // number of device pixels per LCD cell
+    scale = Math.max(1, Math.min(Math.floor(availW / w), Math.floor(availH / h)));
+    while (scale > 1 && (scale * dpr) % 1 !== 0) scale--;
+  } else {
+    scale = Math.max(1, Math.min(Math.floor(availW / w), Math.floor(availH / h)));
+  }
   elCanvas.style.width = `${w * scale}px`;
   elCanvas.style.height = `${h * scale}px`;
   if (renderer.setResolution) renderer.setResolution(w, h);
@@ -1420,7 +1891,13 @@ window.pocketgb.onForceDmg((on) => {
 });
 window.pocketgb.onSaveState((slot) => doSaveState(slot));
 window.pocketgb.onLoadState((slot) => doLoadState(slot));
-window.pocketgb.onAppQuitting(() => flushSav());
+window.pocketgb.onAppQuitting(() => {
+  flushSav();
+  saveResumePoint(true); // synchronous: writeState is ipcRenderer.send
+  stopResumeTimer();
+  stopPlaytimeTicker();
+  if (romInfo) window.pocketgb.playtimePause(true); // commit the accumulator's remainder
+});
 
 // ---- UI events ----
 $('btn-open').addEventListener('click', () => window.pocketgb.openRomDialog());
@@ -1430,6 +1907,47 @@ $('btn-mute').addEventListener('click', () => setMuted(!muted));
 $('btn-library').addEventListener('click', showLibrary);
 $('del-yes').addEventListener('click', confirmDelete);
 $('del-no').addEventListener('click', closeDeleteConfirm);
+
+// generic confirm + state browser
+$('confirm-yes').addEventListener('click', () => closeConfirm(true));
+$('confirm-no').addEventListener('click', () => closeConfirm(false));
+$('btn-states').addEventListener('click', () => { toggleOverlay('ov-menu'); openStateBrowser(null); });
+$('states-close').addEventListener('click', closeStateBrowser);
+
+// ---- Discord presence + play-time panel ----
+let presenceOn = true;
+function syncPresenceUI(st) {
+  presenceOn = !!st.on;
+  const label = `presence: ${presenceOn ? 'on' : 'off'}`;
+  const btn = $('btn-presence');
+  const tbtn = $('presence-toggle');
+  if (btn) btn.textContent = label;
+  if (tbtn) tbtn.textContent = label;
+  const el = $('presence-status');
+  if (el) el.textContent = presenceOn ? (st.connected ? 'connected to discord' : 'waiting for discord…') : 'off — nothing shows on your profile';
+}
+async function refreshPresencePanel() {
+  try {
+    const st = await window.pocketgb.presenceStatus();
+    syncPresenceUI(st);
+    const pt = romInfo ? await window.pocketgb.playtimeGet(romInfo.statesKey) : null;
+    $('presence-pt').textContent = (romInfo && pt)
+      ? `total play time: ${fmtLibPlaytime(pt.total)}`
+      : 'no game loaded';
+  } catch { /* panel is informational */ }
+}
+$('btn-presence').addEventListener('click', () => { openMenuSub('presence-panel'); refreshPresencePanel(); });
+$('presence-back').addEventListener('click', () => openMenuSub('sub-hardware'));
+$('presence-close').addEventListener('click', () => toggleOverlay('ov-menu'));
+$('presence-toggle').addEventListener('click', async () => {
+  syncPresenceUI(await window.pocketgb.presenceToggle(!presenceOn));
+  refreshPresencePanel();
+});
+$('presence-refresh').addEventListener('click', refreshPresencePanel);
+window.pocketgb.onPlaytimeUpdated(() => {
+  // keep the live readout ticking while the panel is on screen
+  if (!$('presence-panel').classList.contains('hidden')) refreshPresencePanel();
+});
 
 // ---- game clock (RTC) control ----
 function fmtClock(t) {
@@ -1513,7 +2031,11 @@ $('btn-cheats').addEventListener('click', () => {
   if (romLoaded && gb.isGba) setStatus('GBA cheats: GameShark/AR, CodeBreaker, and VBA codes — mGBA applies them');
   toggleOverlay('ov-cheats');
 });
-$('btn-finder').addEventListener('click', () => toggleOverlay('ov-finder'));
+$('btn-finder').addEventListener('click', () => {
+  // visible limitation notice instead of a transient status-line message
+  $('finder-gba-note').classList.toggle('hidden', !(gb.isGba && !gb.hasMemoryAccess));
+  toggleOverlay('ov-finder');
+});
 $('btn-effects').addEventListener('click', () => toggleOverlay('ov-effects'));
 $('btn-keys').addEventListener('click', () => toggleOverlay('ov-keys'));
 $('btn-debug').addEventListener('click', () => {
@@ -1606,6 +2128,8 @@ async function renderGallery() {
 }
 $('gal-close').addEventListener('click', () => $('ov-gallery').classList.remove('open'));
 
+$('btn-replay').addEventListener('click', instantReplay);
+
 // gif: toggle recording of the last/next ~10s of frames
 let gifRecording = false;
 $('btn-gif').addEventListener('click', () => {
@@ -1633,16 +2157,97 @@ $('btn-webm').addEventListener('click', () => {
   }
 });
 $('cheat-add').addEventListener('click', addCheat);
-$('cheat-clear').addEventListener('click', () => { gb.cheats.clear(); persistCheats(); renderCheatList(); applyGbaCheats(); });
+$('cheat-clear').addEventListener('click', () => {
+  gb.cheats.clear(); persistCheats(); renderCheatList(); applyGbaCheats();
+  cheatDbOpen = false; $('cheat-db-list').style.display = 'none';
+});
+$('cheat-db').addEventListener('click', cheatDbLookup);
 $('cheat-close').addEventListener('click', () => toggleOverlay('ov-cheats'));
 
-// ---- cheat finder (RAM scanner → GameShark freeze) ----
-// GB/CGB only: it scans the in-process MMU. The mGBA build exposes no memory
-// peek/poke, so a GBA scan would read an all-0xFF stub — gated with a message.
+// ---- cheat finder (RAM scanner → GameShark freeze / GBA RAM freeze) ----
+// GB/CGB scans the in-process MMU. GBA memory is capability-detected: with
+// the stock mGBA build it reports no memory access (clear message); if a
+// memory-capable core is dropped in, the GBA RAM map is scanned and freezes
+// ride the core every frame.
 let finder = window.PocketCheat ? new window.PocketCheat.CheatFinder(() => gb.mmu) : null;
+const GBA_SCAN_RANGES = [
+  [0x02000000, 0x02040000], // EWRAM
+  [0x03000000, 0x03008000], // IWRAM
+];
+// The GBA scan address set is fixed — build it once as a typed array
+// (288K entries; a fresh Array every scan would churn the GC).
+const GBA_SCAN_ADDRS = (() => {
+  const n = (0x02040000 - 0x02000000) + (0x03008000 - 0x03000000);
+  const a = new Uint32Array(n);
+  let i = 0;
+  for (let x = 0x02000000; x < 0x02040000; x++) a[i++] = x;
+  for (let x = 0x03000000; x < 0x03008000; x++) a[i++] = x;
+  return a;
+})();
+// GBA has two finder modes. With a memory-capable core, scans read live RAM
+// and freezes are in-process. The bundled stock core exposes no memory
+// access, so there the finder runs in SNAPSHOT mode: it decodes EWRAM/IWRAM
+// out of freshly saved mGBA states (fixed layout — see mgba-state.js) and a
+// freeze is promoted to a VBA-format cheat code that mGBA applies itself.
+function gbaFinderSnapshotMode() {
+  return !!(gb.isGba && gb._gba && !gb.hasMemoryAccess && window.PocketMgbaState);
+}
+let finderBusy = false; // one scan/narrow at a time (snapshot decode ≈ 50ms)
 function finderAvailable() {
-  if (romLoaded && gb.isGba) { setStatus('cheat finder is GB/GBC only — GBA memory is not exposed by the mGBA build'); return false; }
+  if (!romLoaded) return true;
+  if (gb.isGba) {
+    if (gb.hasMemoryAccess) return true;
+    if (gbaFinderSnapshotMode()) return true;
+    setStatus('cheat finder needs GBA memory access — the bundled mGBA build does not expose it');
+    return false;
+  }
+  if (!gb.hasMemoryAccess) { setStatus('load a game first'); return false; }
   return true;
+}
+// Re-target the finder when the console changes between loads.
+function retargetFinder() {
+  if (!finder) return;
+  const note = $('finder-gba-note');
+  finder.reset();
+  finder.watches = [];
+  if (gb.isGba && gb._gba && gb.hasMemoryAccess) {
+    // live mode: memory-capable core
+    finder.snapshotMode = false;
+    finder.addressProvider = () => {
+      const addrs = [];
+      for (const [lo, hi] of GBA_SCAN_RANGES) for (let a = lo; a < hi; a++) addrs.push(a);
+      return addrs;
+    };
+    finder.gbaMachine = () => gb._gba;
+    if (note) note.classList.add('hidden');
+  } else if (gbaFinderSnapshotMode()) {
+    // snapshot mode: reads come from decoded save states
+    finder.snapshotMode = true;
+    finder.addressProvider = () => GBA_SCAN_ADDRS;
+    finder.snapshotProvider = async () => {
+      const png = gb._gba.saveState(); // PNG bytes; throws before the first frame
+      return window.PocketMgbaState.decodeState(png);
+    };
+    finder.snapshotReader = (state, addr) => state.readBus(addr);
+    finder.gbaMachine = null;
+    if (note) {
+      note.textContent = 'GBA snapshot mode: the bundled mGBA core exposes no live memory, so scans read save states — search, play, then narrow until a few addresses remain. Freeze adds a VBA-format cheat code the core applies itself (values refresh on each scan/narrow).';
+      note.classList.remove('hidden');
+    }
+  } else {
+    finder.snapshotMode = false;
+    finder.addressProvider = null;
+    finder.gbaMachine = null;
+    if (note) note.classList.toggle('hidden', !(gb.isGba && !gb.hasMemoryAccess));
+  }
+}
+// Finder reads go through the GBA machine's peek when present; the stub
+// mmu.read would return 0xFF for everything. Snapshot mode reads the last
+// decoded state.
+function finderRead(addr) {
+  if (gb.isGba && gb._gba && gb.hasMemoryAccess) return gb._gba.readMemory(addr);
+  if (gb.isGba && finder && finder.snapshotMode) return finder.read(addr);
+  return gb.mmu.read(addr);
 }
 function parseFinderValue(raw) {
   const s = String(raw || '').trim().toLowerCase();
@@ -1662,15 +2267,32 @@ function renderFinderList() {
   for (const [addr] of entries) {
     const row = document.createElement('div');
     row.className = 'finder-row';
-    const val = finder.read(addr);
+    const val = finderRead(addr);
     const a = document.createElement('span');
-    a.textContent = `$${addr.toString(16).toUpperCase().padStart(4, '0')} = ${val.toString(16).padStart(2, '0')} (${val})`;
+    a.textContent = `$${addr.toString(16).toUpperCase().padStart(8, '0')} = ${val.toString(16).padStart(2, '0')} (${val})`;
     const freeze = document.createElement('button');
     freeze.className = 'sbutton'; freeze.textContent = 'freeze';
-    freeze.title = 'add a GameShark code that holds this address at its current value';
+    freeze.title = !gb.isGba
+      ? 'add a GameShark code that holds this address at its current value'
+      : (gb.hasMemoryAccess
+        ? 'hold this GBA address at its current value (live RAM freeze)'
+        : 'add a VBA-format cheat code that holds this address at its current value');
     freeze.addEventListener('click', () => {
-      const r = finder.freeze(addr, gb.cheats);
-      if (r && !r.error) { persistCheats(); renderCheatList(); setStatus(`froze $${addr.toString(16).toUpperCase().padStart(4, '0')} — see cheats`); }
+      let r;
+      if (gb.isGba && !gb.hasMemoryAccess) {
+        // snapshot mode: promote to a VBA code (XXXXXXXX:YY) in the cheat
+        // list — mGBA applies it every frame; the value is the last one the
+        // scan saw at this address.
+        const v = finderRead(addr) & 0xFF;
+        const code = `${addr.toString(16).toUpperCase().padStart(8, '0')}:${v.toString(16).toUpperCase().padStart(2, '0')}`;
+        r = gb.cheats.add(code);
+        if (r && !r.error) { persistCheats(); renderCheatList(); applyGbaCheats(); }
+      } else {
+        const target = gb.isGba && gb._gba ? { freeze: (ad, v) => gb._gba.freezeRam(ad, v) } : gb.cheats;
+        r = finder.freeze(addr, target);
+        if (r && !r.error) { persistCheats(); renderCheatList(); }
+      }
+      if (r && !r.error) setStatus(`froze $${addr.toString(16).toUpperCase().padStart(gb.isGba ? 8 : 4, '0')} — see cheats`);
       else err.textContent = (r && r.error) || 'freeze failed';
     });
     const watch = document.createElement('button');
@@ -1703,9 +2325,9 @@ function renderFinderWatches() {
   for (const w of finder.watches) {
     const row = document.createElement('div');
     row.className = 'finder-row watch';
-    const val = finder.read(w.addr);
+    const val = finderRead(w.addr);
     const label = document.createElement('span');
-    label.textContent = `watch $${w.addr.toString(16).toUpperCase().padStart(4, '0')} = ${val} (0x${val.toString(16).padStart(2, '0')})`;
+    label.textContent = `watch $${w.addr.toString(16).toUpperCase().padStart(gb.isGba ? 8 : 4, '0')} = ${val} (0x${val.toString(16).padStart(2, '0')})`;
     const un = document.createElement('button'); un.className = 'sbutton'; un.textContent = 'unwatch';
     un.addEventListener('click', () => { finder.watches = finder.watches.filter((x) => x.addr !== w.addr); renderFinderWatches(); });
     row.appendChild(label); row.appendChild(un);
@@ -1713,44 +2335,49 @@ function renderFinderWatches() {
   }
 }
 setInterval(() => { if ($('ov-finder').classList.contains('open')) renderFinderWatches(); }, 250);
-$('finder-search').addEventListener('click', () => {
-  if (!finderAvailable()) return;
-  if (!finder) return;
+$('finder-search').addEventListener('click', async () => {
+  if (!finderAvailable() || !finder || finderBusy) return;
   const v = parseFinderValue($('finder-input').value);
-  if (v === null) { const n = finder.search(null); setStatus(`search: all ${n} addresses (unknown init)`); renderFinderList(); return; }
-  if (Number.isNaN(v) || v < 0 || v > 255) { $('finder-err').textContent = 'enter 0-255 (decimal or 0x hex)'; return; }
-  const n = finder.search(v);
-  setStatus(`search: ${n} candidates = ${v}`);
-  renderFinderList();
+  if (v === null || Number.isNaN(v) || v < 0 || v > 255) { $('finder-err').textContent = 'enter 0-255 (decimal or 0x hex), or use unknown init'; return; }
+  await runFinderStep(() => finder.search(v), `search: ${'${n}'} candidates = ${v}`);
 });
-$('finder-unknown').addEventListener('click', () => {
-  if (!finderAvailable()) return;
-  if (!finder) return;
-  const n = finder.search(null);
-  setStatus(`search: all ${n} addresses (unknown init)`);
-  renderFinderList();
+$('finder-unknown').addEventListener('click', async () => {
+  if (!finderAvailable() || !finder || finderBusy) return;
+  await runFinderStep(() => finder.search(null), `search: all ${'${n}'} addresses (unknown init)`);
 });
+// Shared scan/narrow runner: snapshot-mode steps decode a save state (~50ms)
+// and can fail (no state yet) — serialize, report errors in the panel, and
+// keep the old render order (status text, then list).
+async function runFinderStep(step, message) {
+  finderBusy = true;
+  try {
+    if (finder.snapshotMode) setStatus('reading save state…');
+    const n = await step();
+    setStatus(message.replace('${n}', String(n)));
+    renderFinderList();
+  } catch (e) {
+    $('finder-err').textContent = 'finder: ' + (e && e.message ? e.message : e);
+  } finally {
+    finderBusy = false;
+  }
+}
 $('finder-narrow').addEventListener('click', () => {
   const row = $('finder-narrow-row'), hint = $('finder-narrow-hint');
   const show = row.style.display === 'none';
   row.style.display = show ? 'flex' : 'none';
   hint.style.display = show ? 'block' : 'none';
 });
-$('finder-apply').addEventListener('click', () => {
-  if (!finderAvailable()) return;
-  if (!finder || !finder.candidates) { $('finder-err').textContent = 'search first'; return; }
+$('finder-apply').addEventListener('click', async () => {
+  if (!finderAvailable() || !finder || finderBusy) return;
+  if (!finder.candidates) { $('finder-err').textContent = 'search first'; return; }
   const op = $('finder-op').value;
   if (op === 'changed' || op === 'unchanged') {
-    const n = finder.narrow({ op });
-    setStatus(`narrow (${op}): ${n} candidates`);
-    renderFinderList();
+    await runFinderStep(() => finder.narrow({ op }), `narrow (${op}): ${'${n}'} candidates`);
     return;
   }
   const v = parseFinderValue($('finder-narrow-val').value);
   if (v === null || Number.isNaN(v) || v < 0 || v > 255) { $('finder-err').textContent = 'enter 0-255 for this filter'; return; }
-  const n = finder.narrow({ op, value: v });
-  setStatus(`narrow: ${n} candidates`);
-  renderFinderList();
+  await runFinderStep(() => finder.narrow({ op, value: v }), `narrow: ${'${n}'} candidates`);
 });
 $('finder-reset').addEventListener('click', () => {
   if (!finderAvailable()) return;
@@ -1878,6 +2505,20 @@ function hashName(name) {
 }
 
 window.addEventListener('resize', resizeCanvas);
+// devicePixelRatio changes (moving between monitors) re-fit the canvas:
+// one-shot media queries, re-armed per DPR value (strict-mode safe).
+function watchDpr(dpr) {
+  const mq = window.matchMedia(`(resolution: ${dpr}dppx)`);
+  mq.addEventListener('change', () => {
+    resizeCanvas();
+    watchDpr(window.devicePixelRatio || 1);
+  }, { once: true });
+}
+if (window.matchMedia) watchDpr(window.devicePixelRatio || 1);
+
+// Auto-save-state sweep: every save/load and the 30s resume timer keep the
+// resume point fresh; the quit and library-exit hooks are the belt to the
+// timer's suspenders (Freebuff restarts, force-quit, etc.).
 
 // ---- boot ----
 // automated-probe hook (inert in production: nothing reads window.probeHook)
