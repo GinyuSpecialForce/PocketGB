@@ -11,10 +11,19 @@ class RewindManager {
     this.entries = [];
     this._last = 0;
     this._failed = 0;
+    // Machines with heavy save states (GBA: ~500KB + ~17ms per snapshot)
+    // opt out of the rolling ring — snapshotting 5×/s stalled the frame loop.
+    // app.js flips this per load via setRewindable(); GB/CGB stays rewindable.
+    this.rewindable = true;
+  }
+
+  setRewindable(on) {
+    this.rewindable = !!on;
+    if (!on) this.entries.length = 0;
   }
 
   update(now) {
-    if (now - this._last < this.interval) return;
+    if (!this.rewindable || now - this._last < this.interval) return;
     this._last = now;
     try {
       this.entries.push(this.gb.saveState());

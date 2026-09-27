@@ -251,12 +251,17 @@ class GbaCheatList {
 }
 
 // ---- Cheat finder (RAM scanner) ------------------------------------------
-// Search working RAM (C000-DFFF via mmu.read, so CGB banking applies) plus
-// high RAM for an 8-bit value, narrow the candidate set by comparing snapshots,
-// watch candidates live, and promote any hit to a real GameShark code that
-// freezes the address. 8-bit covers essentially all GB game state (lives,
-// coins above 255 live as BCD pairs, timers, positions); 16-bit searchers can
-// scan twice: byte found, then narrow by "address ±1 unchanged".
+// Search working RAM for an 8-bit value, narrow the candidate set by
+// comparing snapshots, watch candidates live, and promote any hit to a real
+// GameShark code that freezes the address. 8-bit covers essentially all GB
+// game state (lives, coins above 255 live as BCD pairs, timers, positions);
+// 16-bit searchers can scan twice: byte found, then narrow by "address ±1
+// unchanged". The address set is pluggable: the default is GB WRAM+HRAM; on
+// a memory-capable GBA core the app injects the 768 KB GBA RAM map, and on
+// the stock core (no memory access) it runs in SNAPSHOT mode: scan/narrow
+// read EWRAM/IWRAM out of freshly saved mGBA states (see mgba-state.js) and
+// freezes are promoted to VBA-format codes mGBA applies itself. Snapshot
+// search/narrow are async (state encode/decode) — callers await the count.
 
 class CheatFinder {
   constructor(mmuProvider) {
@@ -264,9 +269,28 @@ class CheatFinder {
     this.candidates = null;      // Map addr → last-seen value, or null
     this.prevSnapshot = null;    // Map addr → value at previous scan
     this.watches = [];           // [{ addr }] polled live by the UI
+    // Snapshot mode (GBA on the stock core, no memory access): reads come
+    // from decoded save states instead of live RAM. The app sets these:
+    //   snapshotProvider: async () => decoded state (fresh save + decode)
+    //   snapshotReader:   (state, busAddr) → 0-255 | null (unmapped)
+    // The decoded state of the most recent scan/narrow is kept in .snapshot
+    // so watch rows and freeze-at-current-value can read without re-saving.
+    this.snapshotMode = false;
+    this.snapshotProvider = null;
+    this.snapshotReader = null;
+    this.snapshot = null;
+  }
+
+  _readAt(source, addr) {
+    if (this.snapshotMode) {
+      const v = this.snapshotReader && source ? this.snapshotReader(source, addr) : null;
+      return v === null || v === undefined ? null : v & 0xFF;
+    }
+    return source ? source.read(addr) & 0xFF : null;
   }
 
   _scanAddresses() {
+    if (this.addressProvider) return { mmu: this.getMmu(), addrs: this.addressProvider() }; // pluggable (GBA)
     const mmu = this.getMmu();
     const addrs = [];
     for (let a = 0xC000; a < 0xE000; a++) addrs.push(a);       // WRAM (8/32K, banking via readWRAM)
@@ -275,8 +299,9 @@ class CheatFinder {
   }
 
   // First search: value === null means "unknown initial value" (take all).
-  // Returns the number of candidates.
+  // Returns the number of candidates (a promise in snapshot mode).
   search(value) {
+    if (this.snapshotMode) return this._snapshotSearch(value);
     const { mmu, addrs } = this._scanAddresses();
     this.candidates = new Map();
     for (const a of addrs) {
@@ -286,12 +311,27 @@ class CheatFinder {
     return this.candidates.size;
   }
 
+  async _snapshotSearch(value) {
+    const state = await this.snapshotProvider();
+    this.snapshot = state;
+    const addrs = this.addressProvider ? this.addressProvider() : [];
+    this.candidates = new Map();
+    for (const a of addrs) {
+      const v = this._readAt(state, a);
+      if (v === null) continue;                      // unmapped for this window
+      if (value === null || v === (value & 0xFF)) this.candidates.set(a, v);
+    }
+    return this.candidates.size;
+  }
+
   // Narrow: keep only candidates matching the filter.
   //   { op: 'eq'|'ne'|'lt'|'gt', value }  — compare against a typed value
   //   { op: 'changed'|'unchanged' }       — compare against the previous scan
   //   { op: 'plus'|'minus', value }       — delta since previous scan
+  // (a promise in snapshot mode)
   narrow(filter) {
     if (!this.candidates) return 0;
+    if (this.snapshotMode) return this._snapshotNarrow(filter);
     const mmu = this.getMmu();
     const next = new Map();
     this.prevSnapshot = this.candidates;
@@ -314,17 +354,50 @@ class CheatFinder {
     return next.size;
   }
 
-  // Watch list: stable polling source for the UI (also survives rescans).
-  read(addr) { const mmu = this.getMmu(); return mmu ? mmu.read(addr & 0xFFFF) & 0xFF : 0; }
+  async _snapshotNarrow(filter) {
+    const state = await this.snapshotProvider();
+    this.snapshot = state;
+    const next = new Map();
+    this.prevSnapshot = this.candidates;
+    for (const [a, oldV] of this.candidates) {
+      const v = this._readAt(state, a);
+      if (v === null) continue;   // disappeared from the map (shouldn't happen)
+      const keep =
+        filter.op === 'changed' ? v !== oldV :
+        filter.op === 'unchanged' ? v === oldV :
+        filter.op === 'plus' ? (v - oldV + 256) % 256 === (filter.value & 0xFF) :
+        filter.op === 'minus' ? (oldV - v + 256) % 256 === (filter.value & 0xFF) :
+        filter.op === 'eq' ? v === (filter.value & 0xFF) :
+        filter.op === 'ne' ? v !== (filter.value & 0xFF) :
+        filter.op === 'lt' ? v < (filter.value & 0xFF) :
+        filter.op === 'gt' ? v > (filter.value & 0xFF) : false;
+      if (keep) next.set(a, v);
+    }
+    this.candidates = next;
+    return next.size;
+  }
 
-  // Promote a candidate to a persistent GameShark code (freezes the address).
-  freeze(addr, engine, value) {
+  // Watch list: stable polling source for the UI (also survives rescans).
+  // In snapshot mode this reads the LAST scanned state — values refresh when
+  // the user scans or narrows again, not live.
+  read(addr) {
+    if (this.snapshotMode) return this._readAt(this.snapshot, addr) ?? 0;
     const mmu = this.getMmu();
-    const v = (value !== undefined ? value : mmu.read(addr)) & 0xFF;
+    return mmu ? mmu.read(addr & 0xFFFF) & 0xFF : 0;
+  }
+
+  // Promote a candidate to a persistent freeze. GB/CGB: a real GameShark code
+  // in the cheat engine. GBA: either a live RAM freeze on a memory-capable
+  // core (the app passes a freezeSurf with freeze(addr,value)) or, in
+  // snapshot mode, a VBA-format code (XXXXXXXX:YY) added to the cheat list —
+  // mGBA applies those itself every frame.
+  freeze(addr, engine, value) {
+    const v = (value !== undefined ? value : this._readAt(this.snapshotMode ? this.snapshot : this.getMmu(), addr)) & 0xFF;
+    if (engine && typeof engine.freeze === 'function') return engine.freeze(addr, v); // GBA freeze surface
     return engine.add(gsFreezeCode(addr, v));
   }
 
-  reset() { this.candidates = null; this.prevSnapshot = null; }
+  reset() { this.candidates = null; this.prevSnapshot = null; this.snapshot = null; }
 }
 
 // Build the GameShark code string that freezes `addr` at `value`

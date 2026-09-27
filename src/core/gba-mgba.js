@@ -38,6 +38,10 @@ class MgbaMachine {
     this.saveName = null;
     this.saveType = null;
     this.cheats = []; // { code, enabled } — app-owned source of truth; synced to the core via .cheats file
+    this._frozen = new Map(); // addr -> value, re-applied every frame (needs memory access)
+    this._coreFrameSerial = 0; // bumped by the core's videoFrameEnded callback
+    this._harvestedSerial = -1;
+    this._serialTrust = undefined; // undefined = probe not started yet
     this.framebuffer = new Uint16Array(GBA_W * GBA_H);
     this.ppu = {
       framebuffer: this.framebuffer,
@@ -72,6 +76,20 @@ class MgbaMachine {
     this.romPath = romPath;
     this.saveName = Module.saveName || '/data/saves/game.sav';
     this.ready = true;
+    // Frame-completion stamp: lets runFrame() skip the glReadPixels pass on
+    // ticks where the core has not finished a new frame since the last
+    // harvest. Must be (re)registered AFTER loadGame — the callback table
+    // lives on the core object, which loadGame creates (and quitGame in the
+    // cheat-reload path destroys). The runFrame() skip stays safe regardless:
+    // it self-probes and falls back to harvest-every-tick if this ever fails.
+    try {
+      Module.addCoreCallbacks({
+        videoFrameEnded: () => { this._coreFrameSerial++; },
+      });
+    } catch { /* callback unsupported: harvest just runs every tick */ }
+    // fresh core: re-run the frame-serial trust probe
+    this._serialTrust = undefined;
+    this._harvestedSerial = -1;
     this.cart = {
       rom: bytes,
       dirty: false,
@@ -137,23 +155,117 @@ class MgbaMachine {
     return 'reloaded';
   }
 
+  // ---- memory access (capability-detected) ---------------------------------
+  // The vendored wasm build exports no bus peek/poke, so GBA RAM is opaque to
+  // the app. A rebuilt core that exports busRead8/busWrite8 lights this up
+  // automatically — no other code change needed. Everything that wants GBA
+  // memory (cheat finder freezes, RetroAchievements logic, scripting) goes
+  // through here and must tolerate null.
+  _ensureMemoryAccess() {
+    if (this._mem !== undefined) return this._mem;
+    const M = this.Module;
+    try {
+      if (typeof M.cwrap === 'function' && typeof M._malloc === 'function') {
+        const r8 = M.cwrap('busRead8', 'number', ['number']);
+        const w8 = M.cwrap('busWrite8', null, ['number', 'number']);
+        r8(0x02000000); // probe: a missing export throws inside cwrap/call
+        this._mem = { read8: (a) => r8(a) & 0xFF, write8: (a, v) => w8(a, v & 0xFF) };
+        return this._mem;
+      }
+    } catch { /* not exported in this build */ }
+    this._mem = null;
+    return null;
+  }
+
+  get hasMemoryAccess() { return this.ready && !!this._ensureMemoryAccess(); }
+
+  readMemory(addr) {
+    const m = this._ensureMemoryAccess();
+    return m ? m.read8(addr >>> 0) : null;
+  }
+
+  writeMemory(addr, value) {
+    const m = this._ensureMemoryAccess();
+    if (m) m.write8(addr >>> 0, value & 0xFF);
+  }
+
+  // RAM freezes: addresses re-written every frame (the cheat-finder's freeze
+  // on GBA). Applied in runFrame before the framebuffer harvest. Independent
+  // of the .cheats-file codes — these need live memory access.
+  freezeRam(addr, value) { this._frozen.set(addr >>> 0, value & 0xFF); this._applyFrozen(); }
+  unfreezeRam(addr) { this._frozen.delete(addr >>> 0); }
+  clearFrozenRam() { this._frozen.clear(); }
+  _applyFrozen() {
+    const m = this._ensureMemoryAccess();
+    if (!m) return;
+    for (const [a, v] of this._frozen) m.write8(a, v);
+  }
+
   // ---- input -------------------------------------------------------------
+  // The glue's Module.buttonPress re-runs cwrap() (building a fresh closure
+  // and arg-conversion table) on EVERY call — 20 constructions per frame at
+  // 60fps is constant GC pressure. cwrap once per button and reuse; ids are
+  // the glue's keyBindings order (a=0…l=9), which BTN_BY_STATE matches.
+  _ensureButtons() {
+    if (this._btn !== undefined) return this._btn;
+    const M = this.Module;
+    try {
+      if (typeof M.cwrap === 'function') {
+        const press = M.cwrap('buttonPress', null, ['number']);
+        const unpress = M.cwrap('buttonUnpress', null, ['number']);
+        this._btn = { press, unpress };
+        return this._btn;
+      }
+    } catch { /* export missing: fall through */ }
+    this._btn = null;
+    return null;
+  }
+
   setInput(state) {
     const Module = this.Module;
     if (!this.ready) return;
-    for (const [key, btn] of BTN_BY_STATE) {
-      if (state[key]) Module.buttonPress(btn); else Module.buttonUnpress(btn);
+    const btn = this._ensureButtons();
+    for (let i = 0; i < BTN_BY_STATE.length; i++) {
+      const key = BTN_BY_STATE[i][0];
+      if (state[key]) {
+        if (btn) btn.press(i); else Module.buttonPress(BTN_BY_STATE[i][1]);
+      } else {
+        if (btn) btn.unpress(i); else Module.buttonUnpress(BTN_BY_STATE[i][1]);
+      }
     }
   }
 
   // ---- frame stepping ----------------------------------------------------
-  // mGBA runs its own main loop (rAF-driven) and paints to the canvas it was
-  // constructed with; runFrame() here just harvests the latest completed frame
-  // from that loop by reading back the framebuffer.
+  // mGBA runs its own main loop (rAF-driven) and paints to its canvas;
+  // runFrame() harvests the latest completed frame from that loop by reading
+  // back the framebuffer. Both loops run on the same 60Hz rAF cadence, so the
+  // picture is at most one core-frame old regardless of registration order —
+  // and when the core's videoFrameEnded callback IS observed firing, the
+  // serial check skips the 2-3ms glReadPixels pass on duplicate ticks (120Hz
+  // displays) and guarantees no partial frames are read mid-paint.
+  // The skip is self-verifying: until the callback is OBSERVED to fire
+  // (20-tick probe) every tick harvests, and if it ever stops the machine
+  // reverts to harvest-every-tick. A silent callback must never freeze the
+  // picture — this build's callback never fires (verified live), so the
+  // fallback path is the one that runs here.
   runFrame() {
     if (!this.ready) return null;
-    this._readFramebuffer();
-    this.ppu.frameComplete = true;
+    this._applyFrozen(); // cheat-finder freezes ride the core's own frame
+    if (this._serialTrust === undefined) {
+      this._serialTrust = null; // null = probing, unknown
+      this._serialProbeStart = this._coreFrameSerial;
+      this._serialProbes = 0;
+    }
+    if (this._serialTrust === null) {
+      if (this._coreFrameSerial !== this._serialProbeStart) this._serialTrust = true;
+      else if (++this._serialProbes > 20) this._serialTrust = false; // callback dead
+    }
+    const fresh = this._serialTrust === false || this._harvestedSerial !== this._coreFrameSerial;
+    if (fresh) {
+      this._harvestedSerial = this._coreFrameSerial;
+      this._readFramebuffer();
+      this.ppu.frameComplete = true;
+    }
     return this.framebuffer;
   }
 
@@ -187,7 +299,8 @@ class MgbaMachine {
   // mGBA's SDL2 audio uses a ScriptProcessorNode routed to its own AudioContext.
   // The app's AudioManager drives GB audio through an AudioWorklet; for GBA we
   // let mGBA's own output run and simply report the rate app.js expects for
-  // pacing math. Mute toggles mGBA's volume.
+  // pacing math. Mute toggles mGBA's volume — this build's scale is 0..1
+  // (verified live: getVolume() returns 1 after unmuting), 0 silences.
   get apu() {
     const self = this;
     return {
@@ -271,7 +384,9 @@ async function createMgbaMachine(canvas) {
   await Module.FSInit();
   Module.setCoreSettings({
     audioSampleRate: 48000,
-    audioBufferSize: 1024,
+    // 2048 samples ≈ 43ms: the ScriptProcessorNode runs on the main thread,
+    // so a busy frame can starve 1024 samples (21ms) into audible underruns.
+    audioBufferSize: 2048,
     // Drive emulation off rAF (videoSync), NOT the audio clock: Chromium keeps
     // AudioContexts suspended until a user gesture, and audioSync throttles the
     // main loop on audio consumption — with a suspended context the core stalls.
@@ -281,9 +396,13 @@ async function createMgbaMachine(canvas) {
     // The app implements its own rewind via save states (src/ui/rewind.js);
     // the core's built-in rewind buffer only costs CPU.
     rewindEnable: false,
-    autoSaveStateEnable: true,
+    // The core's own auto-save-state timer writes mGBA state files to IDBFS
+    // mid-play (periodic main-thread stall); the app owns persistence —
+    // resume points, manual saves, quit flushes — so this stays off.
+    autoSaveStateEnable: false,
   });
-  return new MgbaMachine(Module);
+  const machine = new MgbaMachine(Module);
+  return machine;
 }
 
 if (typeof module !== 'undefined') module.exports = { MgbaMachine, createMgbaMachine, GBA_W, GBA_H };

@@ -130,15 +130,18 @@ function compileMemAddr(str) {
 // ---- evaluation ----
 function readMem(mm, size, addr) {
   let v = 0;
-  // always through the MMU (banking + echo + HRAM); addresses outside RAM
-  // simply read whatever the bus gives, same as rcheevos
-  const b0 = mm.read(addr & 0xFFFF) & 0xFF;
+  // Always through the machine's read surface (banking + echo + HRAM on GB;
+  // the capability-detected bus peek on GBA) — addresses outside RAM read
+  // whatever the bus gives, same as rcheevos. GB machines read via mm.read;
+  // GBA goes through the adapter's readMemory when the core exposes peek.
+  const rd = (a) => (typeof mm.readMemory === 'function' ? mm.readMemory(a) : mm.read(a & 0xFFFF)) & 0xFF;
+  const b0 = rd(addr);
   if (size === 1) return b0;
-  const b1 = mm.read((addr + 1) & 0xFFFF) & 0xFF;
+  const b1 = rd(addr + 1);
   v = b0 | (b1 << 8);
   if (size === 2) return v;
-  const b2 = mm.read((addr + 2) & 0xFFFF) & 0xFF;
-  const b3 = mm.read((addr + 3) & 0xFFFF) & 0xFF;
+  const b2 = rd(addr + 2);
+  const b3 = rd(addr + 3);
   return (v | (b2 << 16) | (b3 << 24)) >>> 0;
 }
 
@@ -331,9 +334,11 @@ class AchievementRuntime {
     this.enabled = this.state.size > 0;
   }
 
-  // Once per frame from the app loop. m: machine with .mmu.
+  // Once per frame from the app loop. m: machine with .mmu (GB) or .readMemory
+  // (GBA with a memory-capable core).
   frame(m) {
-    if (!this.enabled || !this.game || !m || !m.mmu) return;
+    if (!this.enabled || !this.game || !m) return;
+    if (!m.mmu && typeof m.readMemory !== 'function') return;
     for (const s of this.state.values()) {
       if (s.hit) continue;
       let hit = false;

@@ -19,6 +19,15 @@ const _SGB = (typeof SGB !== 'undefined') ? SGB : require('./sgb').SGB;
 const _gbaHeaderValid = (typeof gbaHeaderValid !== 'undefined') ? gbaHeaderValid
   : (typeof require === 'function' ? require('./gba-header').gbaHeaderValid : null);
 
+// Capability probe, not a console check: features that need live memory
+// (cheat finder, RA logic, scripting) gate on this instead of sniffing for a
+// specific machine. GB/CGB always yes; GBA only when the wasm core exposes
+// peek/poke (the vendored build does not — a rebuilt core lights GBA up).
+function hasMemoryAccess() {
+  if (this._gba) return typeof this._gba.hasMemoryAccess === 'function' ? this._gba.hasMemoryAccess : false;
+  return !!(this.cart && this.mmu && this.mmu.read);
+}
+
 function isGbaRom(bytes) {
   if (!_gbaHeaderValid) return false;
   try { return _gbaHeaderValid(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)); }
@@ -155,6 +164,8 @@ class GameBoy {
 
   get isGba() { return !!this._gba || !!this._pendingGba; }
 
+  get hasMemoryAccess() { return hasMemoryAccess.call(this); }
+
   reset() {
     if (this._gba) { this._gba.reset(); return; }
     this.serial.reset();
@@ -254,6 +265,12 @@ class GameBoy {
   // Advance the machine by one rendered frame (70224 m-cycles). Returns the
   // framebuffer when a new frame completes: Uint8Array of 160*144 shade
   // indices on DMG, Uint32Array of BGR555 colors on CGB.
+  // ---- cheat-finder freeze surface (shared with the GB path) ----
+  // GB/CGB: CheatFinder.promote writes a real GameShark code. GBA (memory-
+  // capable core): the finder freeze goes through the mGBA machine instead.
+  freezeRam(addr, value) { if (this._gba && this._gba.freezeRam) this._gba.freezeRam(addr, value); }
+  unfreezeRam(addr) { if (this._gba && this._gba.unfreezeRam) this._gba.unfreezeRam(addr); }
+
   // ---- debugger hooks ----
   // Execution breakpoints: Set of addresses checked before each CPU step.
   get breakpoints() { return this._breakpoints || (this._breakpoints = new Set()); }

@@ -16,7 +16,7 @@ class Capture {
     this.canvas = mainCanvas;
     this.frames = [];           // DMG: recent frames as Uint8Array(160*144) shade indices
     this.framesCgb = [];        // CGB: recent frames as Uint16Array(160*144) BGR555
-    this.maxFrames = 300;       // ~5s at 60fps of rolling history
+    this.maxFrames = 1800;      // rolling history: 30s at 60fps (instant replay)
     // Buffer pool: history frames cycle through the same ~300 buffers forever
     // instead of allocating 23KB/frame (~1.4 MB/s of GC churn → periodic
     // multi-frame stalls). Recording still takes fresh private copies.
@@ -29,6 +29,11 @@ class Capture {
     this.recorder = null;       // MediaRecorder while recording WebM
     this._lastCapture = 0;
     this.onStatus = null;
+    // Input masks parallel to the frame history (one per observed frame), so
+    // instant replay can burn a button strip into the GIF. Movie v2 masks:
+    // bits 0-7 GB buttons, 8/9 GBA L/R (PocketMovie.MASK_KEYS order).
+    this.inputMasks = [];
+    this.replaySeconds = 30;    // how much history a replay exports
   }
 
   setOnStatus(cb) { this.onStatus = cb; }
@@ -39,6 +44,7 @@ class Capture {
   resetHistory() {
     this.frames.length = 0;
     this.framesCgb.length = 0;
+    this.inputMasks.length = 0;
     this.recorded.length = 0;
     this.recordedCgb.length = 0;
     this.recordMode = null;
@@ -47,7 +53,9 @@ class Capture {
 
   // Rolling history for "record last N seconds" — call once per presented frame.
   // fb is a shade-index Uint8Array (DMG) or BGR555 Uint32Array (CGB).
-  observe(fb, isColor) {
+  // inputMask (optional): the frame's button state as a movie-v2 mask
+  // (PocketMovie.stateToMask) — paired with the frame for instant replay.
+  observe(fb, isColor, inputMask) {
     const now = performance.now();
     if (now - this._lastCapture < 16.6) return;
     this._lastCapture = now;
@@ -59,7 +67,11 @@ class Capture {
       if (!copy || copy.length !== fb.length) copy = new Uint16Array(fb.length);
       for (let i = 0; i < copy.length; i++) copy[i] = fb[i] & 0x7FFF; // 555 (bit 15 unused)
       this.framesCgb.push(copy);
-      if (this.framesCgb.length > this.maxFrames) this._poolCgb.push(this.framesCgb.shift());
+      this.inputMasks.push(Number(inputMask) || 0);
+      if (this.framesCgb.length > this.maxFrames) {
+        this._poolCgb.push(this.framesCgb.shift());
+        this.inputMasks.shift();
+      }
       if (this.recording && this.recordMode === 'cgb') {
         this.recordedCgb.push(new Uint16Array(copy)); // private copy: recording outlives history
         if (this.recordedCgb.length % 30 === 0) {
@@ -73,7 +85,11 @@ class Capture {
     if (!copy) copy = new Uint8Array(160 * 144);
     copy.set(fb);
     this.frames.push(copy);
-    if (this.frames.length > this.maxFrames) this._poolDmg.push(this.frames.shift());
+    this.inputMasks.push(Number(inputMask) || 0);
+    if (this.frames.length > this.maxFrames) {
+      this._poolDmg.push(this.frames.shift());
+      this.inputMasks.shift();
+    }
     if (this.recording && this.recordMode === 'dmg') {
       this.recorded.push(new Uint8Array(copy)); // private copy
       if (this.recorded.length % 30 === 0) {
@@ -120,6 +136,39 @@ class Capture {
       window.pocketgb.saveFile(name, b64).then((p) => {
         this.status(p ? `saved ${name}` : 'gif save failed');
       });
+    }, 30);
+  }
+
+  // ---- instant replay: the last N seconds as a GIF ----
+  // No recording has to be running: the rolling history IS the recording.
+  // replayInput (optional) renders a button strip under the frames.
+  replayGif(replayInput) {
+    const seconds = this.replaySeconds;
+    const color = this.framesCgb.length > 0; // same heuristic as startGif
+    const allFrames = color ? this.framesCgb : this.frames;
+    if (allFrames.length < 10) { this.status('not enough history yet — play a little first'); return; }
+    // Masks and frames are pushed together; trim any stale mask surplus
+    // (e.g. a DMG→CGB mid-session switch) from the front before slicing.
+    let masks = this.inputMasks;
+    if (masks.length > allFrames.length) masks = masks.slice(masks.length - allFrames.length);
+    const n = Math.min(allFrames.length, seconds * 60, masks.length);
+    let frames = allFrames.slice(allFrames.length - n);
+    masks = masks.slice(masks.length - n);
+    this.status(`encoding ${Math.round(n / 60)}s replay gif…`);
+    setTimeout(() => {
+      try {
+        if (replayInput) frames = replayInput.renderFrames(frames, masks); // burn the strip in first
+        const bytes = color
+          ? encodeGifColor(frames, 160, frames[0].length / 160)
+          : encodeGif(frames, this.renderer.palRGB);
+        const b64 = bytesToBase64(bytes);
+        const name = `pocketgb-replay-${new Date().toISOString().replace(/[:.]/g, '-')}.gif`;
+        window.pocketgb.saveFile(name, b64).then((p) => {
+          this.status(p ? `replay saved ${name}` : 'replay save failed');
+        });
+      } catch (err) {
+        this.status(`replay failed: ${err && err.message || err}`);
+      }
     }, 30);
   }
 
@@ -170,7 +219,84 @@ function bytesToBase64(bytes) {
   return btoa(bin);
 }
 
-// ---- GIF89a encoding ----
+// PocketReplayInput: burns the frame's button presses into a strip under the
+// picture, TAS-style — one labeled key per button, lit while held. Runs on
+// indexed pixels (DMG shade indices / CGB palette indices) so it composes
+// before GIF quantization instead of fighting it. Pure and DOM-free: the
+// 5x7 font is a hardcoded bitmap, so this unit-tests in Node.
+const REPLAY_KEYS = [
+  { mask: 1, label: 'A' }, { mask: 2, label: 'B' }, { mask: 4, label: 'SEL' },
+  { mask: 8, label: 'STA' }, { mask: 512, label: 'L' }, { mask: 256, label: 'R' },
+  { mask: 32, label: '<' }, { mask: 128, label: 'v' }, { mask: 64, label: '^' },
+  { mask: 16, label: '>' },
+];
+class PocketReplayInput {
+  constructor(opts = {}) {
+    this.stripHeight = opts.stripHeight || 16;
+    // DMG shade indices (0 lightest … 3 darkest): black strip, glyphs white,
+    // held-input frames tint the strip one shade lighter.
+    this.background = opts.background !== undefined ? opts.background : 3;
+    this.foreground = opts.foreground !== undefined ? opts.foreground : 2;
+    this.litColor = opts.litColor !== undefined ? opts.litColor : 0;
+    // CGB frames are BGR555, so the strip draws real colors: black bg, dim
+    // tint, white glyphs — quantization keeps them (≤3 extra unique colors).
+    this._cgb = { bg: 0x0000, dim: 0x4210, lit: 0x7FFF };
+  }
+
+  // frames: array of Uint8Array (DMG shade indices) or Uint16Array (CGB
+  // BGR555) frame pixels, W=160. masks: parallel button-mask array
+  // (PocketMovie.stateToMask bits). Returns NEW frames of height H + strip.
+  renderFrames(frames, masks) {
+    const W = 160;
+    const inH = frames[0].length / W;
+    const outH = inH + this.stripHeight;
+    const isCgb = frames[0] instanceof Uint16Array;
+    const Out = isCgb ? Uint16Array : Uint8Array;
+    const bg = isCgb ? this._cgb.bg : this.background;
+    const tint = isCgb ? this._cgb.dim : this.foreground;
+    const lit = isCgb ? this._cgb.lit : this.litColor;
+    const fontH = 7, fontW = 5;
+    const y0 = inH + Math.floor((this.stripHeight - fontH) / 2);
+    return frames.map((frame, fi) => {
+      const out = new Out(outH * W);
+      out.fill(bg);
+      out.set(frame, 0); // picture on top
+      const mask = masks[fi] || 0;
+      const label = this._label(mask);
+      const w = label.length * (fontW + 1) - 1;
+      let px = Math.floor((W - w) / 2);
+      for (const ch of label) {
+        const glyph = FONT5X7[ch];
+        if (glyph) {
+          for (let r = 0; r < fontH; r++) {
+            for (let c = 0; c < fontW; c++) {
+              if (glyph[r] & (1 << (fontW - 1 - c))) {
+                const yy = y0 + r, xx = px + c;
+                if (yy >= inH && yy < outH && xx >= 0 && xx < W) out[yy * W + xx] = lit;
+              }
+            }
+          }
+        }
+        px += fontW + 1;
+      }
+      // held keys tint the whole strip — visible at a glance even when tiny
+      if (mask) {
+        for (let x = 0; x < W; x++) {
+          if (out[inH * W + x] === bg) out[inH * W + x] = tint;
+        }
+      }
+      return out;
+    });
+  }
+
+  _label(mask) {
+    // up to three simultaneous keys stay readable; beyond that show a count
+    const held = REPLAY_KEYS.filter((k) => mask & k.mask).map((k) => k.label);
+    if (!held.length) return '';
+    if (held.length <= 3) return held.join('+');
+    return `${held.length} KEYS`;
+  }
+}
 
 // frames: array of Uint8Array(W*H) palette indices. palette: array of [r,g,b]
 // (padded to a power of two). Works for any palette size 2–256.
@@ -381,6 +507,52 @@ function lzwEncode(pixels, minCodeSize) {
   return out;
 }
 
+// 5x7 bitmap font (rows packed MSB-first) for the replay strip.
+const FONT5X7 = {
+  A: [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+  B: [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+  C: [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
+  D: [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
+  E: [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+  F: [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+  G: [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
+  H: [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+  I: [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
+  J: [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
+  K: [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+  L: [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+  M: [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
+  N: [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
+  O: [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+  P: [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+  Q: [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
+  R: [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+  S: [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
+  T: [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+  U: [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+  V: [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
+  W: [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11],
+  X: [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+  Y: [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
+  Z: [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+  '0': [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+  '1': [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+  '2': [0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F],
+  '3': [0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E],
+  '4': [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+  '5': [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+  '6': [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+  '7': [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+  '8': [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+  '9': [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+  '+': [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
+  '<': [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
+  '>': [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
+  '^': [0x04, 0x0E, 0x15, 0x04, 0x04, 0x04, 0x04],
+  v: [0x04, 0x04, 0x04, 0x04, 0x15, 0x0E, 0x04],
+  ' ': [0, 0, 0, 0, 0, 0, 0],
+};
+
 if (typeof module !== 'undefined') {
-  module.exports = { Capture, encodeGif, encodeGifColor, encodeGifIndexed, quantize555, medianCut555, lzwEncode };
+  module.exports = { Capture, encodeGif, encodeGifColor, encodeGifIndexed, quantize555, medianCut555, lzwEncode, PocketReplayInput, FONT5X7, REPLAY_KEYS };
 }

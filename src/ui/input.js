@@ -91,9 +91,9 @@ class InputManager {
       if (e.code === 'Tab' || e.code === 'Backspace') {
         e.preventDefault();
         for (const l of this.hotkeyListeners) l(down ? (e.code === 'Tab' ? 'turbo-on' : 'rewind-on') : (e.code === 'Tab' ? 'turbo-off' : 'rewind-off'));
-      } else if (down && (e.code === 'F2' || e.code === 'F6' || e.code === 'F8' || e.code === 'F10')) {
+      } else if (down && (e.code === 'F2' || e.code === 'F6' || e.code === 'F7' || e.code === 'F8' || e.code === 'F10')) {
         e.preventDefault();
-        const action = e.code === 'F2' ? 'cheats' : e.code === 'F6' ? 'effects' : e.code === 'F8' ? 'practice-reset' : 'keys';
+        const action = e.code === 'F2' ? 'cheats' : e.code === 'F6' ? 'effects' : e.code === 'F7' ? 'instant-replay' : e.code === 'F8' ? 'practice-reset' : 'keys';
         for (const l of this.hotkeyListeners) l(action);
       }
       return;
