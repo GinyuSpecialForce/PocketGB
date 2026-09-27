@@ -73,6 +73,69 @@ function romKey(romPath) {
   return Buffer.from(romPath.toLowerCase()).toString('base64url');
 }
 
+// ---- Discord Rich Presence + play-time stats (#10) ----
+// Both live in the MAIN process: presence needs the local Discord IPC pipe
+// (the renderer is app://-origin sandboxed) and play time must keep counting
+// honestly no matter what the renderer tab is doing. The tracker only
+// advances on an explicit 'playtime-tick' from the renderer while a game is
+// actually running (loaded, unpaused, window focused).
+const { buildActivity, DiscordRpcClient } = require('./src/main/discord-rpc');
+const { addTime, getTime, fmtPlaytime, PlaySession } = require('./src/main/playtime');
+const DISCORD_CLIENT_ID = '1421819172729315499';
+let discord = null; // latched client (reconnects after Discord restarts)
+let discordTimer = null;
+const playSession = new PlaySession();
+let discordActivityOn = readSettings()['discordRpc'] !== false; // default ON
+
+function activityPayload() {
+  if (!currentRom) return null;
+  return buildActivity({
+    title: currentRom.title,
+    state: playSession.key ? `playing — session ${fmtPlaytime(playSession.elapsed)}` : 'in the library',
+    elapsedSeconds: playSession.key ? playSession.elapsed : undefined,
+  });
+}
+function pushPresence() {
+  if (!discordActivityOn || !discord) return;
+  discord.setActivity(activityPayload());
+}
+function ensureDiscord() {
+  if (!discordActivityOn) return;
+  if (!discord) {
+    discord = new DiscordRpcClient({
+      clientId: DISCORD_CLIENT_ID,
+      onClose: () => {
+        // Discord quit (or the pipe vanished) — retry in the background so a
+        // restarted Discord picks the presence back up on its own.
+        if (discordTimer) clearTimeout(discordTimer);
+        discordTimer = setTimeout(() => { discordTimer = null; ensureDiscord(); }, 15000);
+      },
+    });
+  }
+  if (discord.sock) return; // connected (or already mid-reconnect)
+  discord.connect().then(() => pushPresence()).catch(() => { /* not running; onClose fires the retry */ });
+}
+function stopDiscordRetry() { if (discordTimer) { clearTimeout(discordTimer); discordTimer = null; } }
+function flushPlaytime() {
+  const key = playSession.key;
+  if (!key) return;
+  const whole = playSession.take();
+  if (whole > 0) {
+    writeSetting(`game:${key}:playtime`, getTime(readSettings(), key) + whole);
+    send('playtime-updated', { key, total: getTime(readSettings(), key) });
+  }
+}
+
+// Called by loadRomFromPath for every ROM open — starts/switches the play
+// session, commits the previous game's seconds, refreshes presence.
+function onRomOpenedForPresence(romPath) {
+  const key = romKey(romPath);
+  flushPlaytime();
+  playSession.start(key);
+  ensureDiscord();
+  pushPresence();
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 480, height: 560,
@@ -160,6 +223,7 @@ function loadRomFromPath(romPath, patchPath) {
       statesKey: romKey(romPath),
     });
     if (win) win.setTitle(`PocketGB — ${title}`);
+    onRomOpenedForPresence(romPath);
   } catch (err) {
     dialog.showErrorBox('Could not open ROM', String(err.message || err));
   }
@@ -493,8 +557,19 @@ app.whenReady().then(() => {
           try { mtime = fs.statSync(path.join(d, f)).mtimeMs; } catch { }
           try { hasThumb = fs.existsSync(path.join(d, f + '.png')); } catch { }
           return { slot, file: f, mtime, hasThumb };
-        });
+        })
+        .filter(s => Number.isFinite(s.slot)); // 'resume.state' is not a numbered slot
     } catch { return []; }
+  });
+  // Delete one save-state (bytes + optional thumbnail) by full path.
+  ipcMain.handle('delete-state', (e, statePath) => {
+    try {
+      const p = path.isAbsolute(statePath) ? statePath : path.join(statesDir(), path.basename(statePath));
+      if (path.dirname(p) !== statesDir()) return { ok: false, error: 'not a state path' };
+      try { fs.unlinkSync(p); } catch { /* already gone */ }
+      try { fs.unlinkSync(p + '.png'); } catch { /* no thumbnail */ }
+      return { ok: true };
+    } catch (err) { return { ok: false, error: String(err.message || err) }; }
   });
 
   // link cable (netplay)
@@ -549,8 +624,128 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('ra-whoami', () => ({ user: readSettings()['ra.user'] || null }));
 
+  // ---- cheat database lookup (gamehacking.org) ----
+  // Network lives here like RA: the COEP-locked renderer can't fetch off-origin.
+  // ghcrc is GH's full-file CRC32 — an exact version match when present.
+  const { CheatDbClient, crc32Hex, splitCheatLines } = require('./src/core/cheatdb');
+  let cheatDb = null;
+  function getCheatDb() {
+    if (!cheatDb) cheatDb = new CheatDbClient({});
+    return cheatDb;
+  }
+  ipcMain.handle('cheatdb-search', async (e, sys, query, ghcrc) => {
+    try {
+      if (typeof sys !== 'string' || typeof query !== 'string') return { ok: false, error: 'bad query' };
+      let games = await getCheatDb().searchGamesWithFallback(sys, query);
+      let exactCrc = false;
+      if (ghcrc) {
+        const byCrc = games.filter((g) => (g.crc || '').toUpperCase() === String(ghcrc).toUpperCase());
+        if (byCrc.length === 1) { games = byCrc; exactCrc = true; }
+      }
+      return { ok: true, games, exactCrc };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+  ipcMain.handle('cheatdb-codes', async (e, gamId) => {
+    try {
+      const groups = await getCheatDb().fetchGroups(gamId);
+      return { ok: true, groups, url: require('./src/core/cheatdb').CheatDbClient.sourceUrl(gamId) };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+  ipcMain.handle('cheatdb-crc', (e, bytes) => {
+    try {
+      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength < 0x150) return { ok: false, error: 'bad rom' };
+      return { ok: true, crc: crc32Hex(new Uint8Array(bytes)) };
+    } catch (err) { return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+  ipcMain.handle('cheatdb-split-lines', (e, text) => ({ ok: true, lines: splitCheatLines(String(text || '')) }));
+
+  // ---- local multiplayer hub ----
+  // Spawns a second PocketGB with --pgb-* flags (src/main/hub.js); the new
+  // instance auto-loads the ROM and raises its end of the link cable. The
+  // first window hosts when the user asks for player-2 — hosting with port 0
+  // lets the OS pick a free loopback port, so "2-player" just works.
+  const { parseHubArgs, buildSpawnArgs } = require('./src/main/hub');
+  ipcMain.handle('hub-spawn', async (e, { rom, role, port } = {}) => {
+    try {
+      if (rom && (typeof rom !== 'string' || !path.isAbsolute(rom) || !fs.existsSync(rom))) {
+        return { ok: false, error: 'bad rom path' };
+      }
+      if (role && role !== 'host' && role !== 'join') return { ok: false, error: 'bad role' };
+      // Host: bind now so we know the port the second window will join.
+      let hostPort = Number(port) || 0;
+      if (role === 'host') {
+        const st = await getLink().host(hostPort, { lan: false });
+        hostPort = st.port || hostPort;
+      }
+      // Anchor the app path explicitly: `electron .` resolves argv[1]
+      // relative to the child's cwd, which is not our project dir.
+      const args = buildSpawnArgs({ baseArgs: [app.getAppPath()], rom: rom || null, role: role || null, port: hostPort });
+      const { spawn } = require('child_process');
+      const child = spawn(process.execPath, args, {
+        cwd: path.dirname(process.execPath),
+        detached: false,
+        stdio: 'ignore',
+      });
+      child.on('error', (err) => send('link-error', `player 2 launch failed: ${err.message}`));
+      return { ok: true, pid: child.pid, port: hostPort };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+
+  // ---- presence + play-time IPC ----
+  ipcMain.on('playtime-tick', (e, seconds) => {
+    const s = Number(seconds);
+    if (!playSession.key || !Number.isFinite(s) || s <= 0) return;
+    playSession.tick(Math.min(s, 5)); // clamp: a stalled renderer can't fast-forward the clock
+    if (playSession.played >= 15) flushPlaytime(); // commit every ~15s of play
+    pushPresence(); // keeps the session elapsed on the profile fresh
+  });
+  ipcMain.on('playtime-pause', (e, { paused } = {}) => {
+    if (paused && playSession.key) flushPlaytime();
+    if (discord && discord.ready) {
+      // Paused shows as idle-style presence without killing the game details.
+      discord.setActivity(buildActivity({
+        title: currentRom ? currentRom.title : undefined,
+        state: 'paused',
+      }));
+    }
+  });
+  ipcMain.handle('playtime-get', (e, key) => ({ key, total: getTime(readSettings(), key) }));
+  ipcMain.handle('presence-toggle', (e, on) => {
+    discordActivityOn = !!on;
+    writeSetting('discordRpc', discordActivityOn);
+    if (discordActivityOn) { ensureDiscord(); pushPresence(); }
+    else if (discord) { discord.clearActivity(); discord.destroy(); stopDiscordRetry(); }
+    return { on: discordActivityOn };
+  });
+  ipcMain.handle('presence-status', () => ({ on: discordActivityOn, connected: !!(discord && discord.sock && discord.ready) }));
+
   buildMenu();
   createWindow();
+
+  // Local-multiplayer hub: this instance may BE the player-2 window.
+  // Auto-load the ROM, then auto-raise the link cable per the flags. The
+  // renderer drives ROM loading, so this hand-off happens over IPC.
+  const hub = parseHubArgs(process.argv);
+  if (hub.second) {
+    win.webContents.once('did-finish-load', () => {
+      // This window IS player 2: load the ROM through the normal main-process
+      // path (builds the full rom-opened payload), then raise the cable.
+      if (hub.rom) loadRomFromPath(hub.rom);
+      if (hub.role === 'host') {
+        getLink().host(hub.port, { lan: false }).catch(() => { /* status shows it */ });
+      } else if (hub.role === 'join') {
+        // small delay: the ROM must be loading before the first serial bytes
+        setTimeout(() => { getLink().join(hub.port || 8765, '127.0.0.1').catch(() => {}); }, 1500);
+      }
+    });
+  }
 
   // Auto-update: silent background checks; explicit check via Help menu.
   updater.start((text) => send('update-status', text));
@@ -564,5 +759,8 @@ app.on('window-all-closed', () => { app.quit(); });
 app.on('before-quit', () => {
   updater.stop();
   if (link) link.dispose();
+  flushPlaytime(); // bank the last partial tick before the process goes away
+  if (discord) { try { discord.clearActivity(); discord.destroy(); } catch { /* pipe may be gone */ } }
+  stopDiscordRetry();
   send('app-quitting');
 });
