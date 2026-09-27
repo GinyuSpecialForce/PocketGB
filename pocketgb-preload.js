@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('pocketgb', {
   readState: (path) => ipcRenderer.invoke('read-state', path),
   readThumbnail: (path) => ipcRenderer.invoke('read-thumbnail', path),
   listStates: (key) => ipcRenderer.invoke('list-states', key),
+  deleteState: (path) => ipcRenderer.invoke('delete-state', path),
   deleteRom: (romPath) => ipcRenderer.invoke('delete-rom', romPath),
   deleteSaves: (romPath) => ipcRenderer.invoke('delete-saves', romPath),
   onReset: (cb) => ipcRenderer.on('reset', () => cb()),
@@ -41,6 +42,7 @@ contextBridge.exposeInMainWorld('pocketgb', {
   onLinkData: (cb) => ipcRenderer.on('link-data', (e, u8) => cb(u8)),
   onLinkStatus: (cb) => ipcRenderer.on('link-status', (e, st) => cb(st)),
   onLinkHosting: (cb) => ipcRenderer.on('link-hosting', (e, port) => cb(port)),
+  hubSpawn: (opts) => ipcRenderer.invoke('hub-spawn', opts),
   onLinkError: (cb) => ipcRenderer.on('link-error', (e, msg) => cb(msg)),
   onUpdateStatus: (cb) => ipcRenderer.on('update-status', (e, text) => cb(text)),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
@@ -50,4 +52,16 @@ contextBridge.exposeInMainWorld('pocketgb', {
   raSession: (romB64) => ipcRenderer.invoke('ra-session', romB64),
   raAward: (achId, hardcore, gameHash) => ipcRenderer.invoke('ra-award', achId, hardcore, gameHash),
   raWhoami: () => ipcRenderer.invoke('ra-whoami'),
+  // cheat database (gamehacking.org)
+  cheatDbSearch: (sys, query, ghcrc) => ipcRenderer.invoke('cheatdb-search', sys, query, ghcrc),
+  cheatDbCodes: (gamId) => ipcRenderer.invoke('cheatdb-codes', gamId),
+  cheatDbCrc: (bytes) => ipcRenderer.invoke('cheatdb-crc', bytes),
+  cheatDbSplitLines: (text) => ipcRenderer.invoke('cheatdb-split-lines', text),
+  // Discord presence + play-time stats (main-process owned)
+  playtimeTick: (seconds) => ipcRenderer.send('playtime-tick', seconds),
+  playtimePause: (paused) => ipcRenderer.send('playtime-pause', { paused: !!paused }),
+  playtimeGet: (key) => ipcRenderer.invoke('playtime-get', key),
+  presenceToggle: (on) => ipcRenderer.invoke('presence-toggle', !!on),
+  presenceStatus: () => ipcRenderer.invoke('presence-status'),
+  onPlaytimeUpdated: (cb) => ipcRenderer.on('playtime-updated', (e, info) => cb(info)),
 });
