@@ -74,3 +74,62 @@ test('lzwEncode round-trips trivially and respects 12-bit dictionary reset', () 
   const bytes = lzwEncode(ramp, 8);
   assert.ok(bytes.length > 0);
 });
+
+// Spec-faithful GIF LZW decoder (GIF89a appendix F): grows the code size when
+// the dictionary reaches it and stops growing at 12 bits (no early reset).
+function lzwDecode(data, minCodeSize) {
+  const clear = 1 << minCodeSize, eoi = clear + 1;
+  let codeSize = minCodeSize + 1, prev = null;
+  let dict = [];
+  const reset = () => {
+    dict = [];
+    for (let i = 0; i < clear; i++) dict.push([i]);
+    dict.push(null); dict.push(null);
+  };
+  reset();
+  let bitPos = 0;
+  const read = () => {
+    if ((bitPos + codeSize) > data.length * 8) return null;
+    let code = 0;
+    for (let i = 0; i < codeSize; i++) {
+      code |= ((data[bitPos >> 3] >> (bitPos & 7)) & 1) << i;
+      bitPos++;
+    }
+    return code;
+  };
+  const out = [];
+  for (;;) {
+    const code = read();
+    if (code === null) throw new Error('stream ended without EOI');
+    if (code === clear) { reset(); prev = null; continue; }
+    if (code === eoi) return out;
+    let entry;
+    if (code < dict.length && dict[code]) entry = dict[code];
+    else if (code === dict.length && prev) entry = prev.concat([prev[0]]);
+    else throw new Error(`bad code ${code} (dict ${dict.length})`);
+    for (const px of entry) out.push(px);
+    if (prev) {
+      dict.push(prev.concat([entry[0]]));
+      if (dict.length === (1 << codeSize) && codeSize < 12) codeSize++;
+    }
+    prev = entry;
+  }
+}
+
+test('lzwEncode round-trips through a spec decoder, including growth past 4096', () => {
+  // Long structured runs force the dictionary past 4096 entries: the encoder
+  // must emit CLEAR exactly when full (not one code late — the classic GIF
+  // corruption bug, and not early either, which decoders tolerate but
+  // wastes space) and keep 12-bit codes until then.
+  const px = new Uint8Array(30000);
+  let s = 123456789;
+  const rng = () => (s = (s * 1103515245 + 12345) & 0x7fffffff);
+  for (let i = 0; i < px.length; i++) px[i] = rng() & 0xFF;
+  for (let i = 0; i < px.length / 3; i++) px[(rng() % px.length)] = px[i * 2 % px.length];
+  const enc = Uint8Array.from(lzwEncode(px, 8));
+  const dec = lzwDecode(enc, 8);
+  assert.strictEqual(dec.length, px.length, 'decoded length matches');
+  let same = true;
+  for (let i = 0; i < px.length; i++) if (dec[i] !== px[i]) { same = false; break; }
+  assert.ok(same, 'decoded pixels match');
+});

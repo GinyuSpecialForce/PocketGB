@@ -138,6 +138,24 @@ test('applyCheats after a clean boot append-parses without reloading', () => {
   assert.equal(machine.applyCheats([{ code: '02036D42 00000063', enabled: false }]), 'reloaded');
 });
 
+test('saveState bumps a monotonic stamp; discontinuities reset it', () => {
+  const { MgbaMachine } = require('../src/core/gba-mgba');
+  const Module = fakeModule();
+  const machine = new MgbaMachine(Module);
+  machine.loadROM(GBA_ROM, null, []);
+  machine.ready = true;
+  Module.forceAutoSaveState = () => { Module.__state = new Uint8Array([1]); return true; };
+  Module.getAutoSaveState = () => ({ data: Module.__state });
+  const s1 = machine.stateStamp();
+  machine.saveState();
+  const s2 = machine.stateStamp();
+  assert.ok(s2 > s1, 'a fresh state is a new observation window');
+  machine.loadState(new Uint8Array([1]));
+  assert.equal(machine.stateStamp(), 0, 'loadState is a discontinuity');
+  machine.saveState();
+  assert.ok(machine.stateStamp() > 0, 'and the clock starts over');
+});
+
 test('GBA cheat parsing: AR/GS, CodeBreaker, VBA, and rejections', () => {
   const { parseGbaCheatLine } = require('../src/core/cheats');
   // GameShark/AR: 8+8 hex with a RAM address

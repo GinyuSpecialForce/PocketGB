@@ -5,8 +5,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const {
-  MgbaState, decodeState, rebuildStatePng, patchState,
-  findPngChunk, replacePngChunk, busToPayload, describeLayout, LAYOUT,
+  MgbaState, decodeState, rebuildStatePng,
+  findPngChunk, replacePngChunk, busToPayload, LAYOUT,
 } = require('../src/core/mgba-state');
 
 // ---- synthetic state PNG builder -------------------------------------------
@@ -96,42 +96,31 @@ test('decodeState reads EWRAM/IWRAM windows; busToPayload decodes the bus map', 
   assert.strictEqual(st.readBus(0x09035000), null, 'ROM mirror territory is not RAM');
 });
 
-test('writeBus writes through mirrors; MgbaState.scannable gates addresses', async () => {
+test('writeBus writes through mirrors; out-of-window buses are ignored', async () => {
   const st = new MgbaState(new Uint8Array(LAYOUT.total));
   st.writeBus(0x02000010, 0xAB);
   assert.strictEqual(st.ewram[0x10], 0xAB);
   assert.strictEqual(st.readBus(0x02040010), 0xAB, 'EWRAM mirror alias sees the write');
   st.writeBus(0x04000208, 0x1); // I/O: silently ignored (no scan window)
   assert.strictEqual(st.readBus(0x04000208), null);
-  assert.strictEqual(MgbaState.scannable(0x02000000), true);
-  assert.strictEqual(MgbaState.scannable(0x03007FFF), true);
-  assert.strictEqual(MgbaState.scannable(0x05000000), false);
 });
 
-test('patchState round-trips: decode → mutate → rebuild → decode', async () => {
+test('decode → mutate → rebuildStatePng → decode round-trips', async () => {
   const png = await makeStatePng(0, 0);
-  const out = await patchState(png, (st) => {
-    st.ewram[0x1234] = 0x5A;
-    st.writeBus(0x03000100, 0x3C);
-  });
+  const st = await decodeState(png);
+  st.ewram[0x1234] = 0x5A;
+  st.writeBus(0x03000100, 0x3C);
+  const out = await rebuildStatePng(png, st);
   assert.ok(out.length > 8, 'rebuilt PNG bytes');
   const st2 = await decodeState(out);
   assert.strictEqual(st2.ewram[0x1234], 0x5A, 'EWRAM patch persisted through rebuild');
   assert.strictEqual(st2.readBus(0x03000100), 0x3C, 'IWRAM bus patch persisted');
-  // original png untouched (patchState is not in-place)
+  // original png untouched (rebuild is not in-place)
   const st0 = await decodeState(png);
   assert.strictEqual(st0.ewram[0x1234], 0);
-  // rebuild around an explicitly decoded state
-  const st3 = await decodeState(out);
-  st3.ewram[0x1235] = 0xEE;
-  const out2 = await rebuildStatePng(out, st3);
-  assert.strictEqual((await decodeState(out2)).ewram[0x1235], 0xEE);
 });
 
-test('describeLayout validates the fixed layout; decode rejects wrong sizes', async () => {
-  const ok = describeLayout(LAYOUT.total);
-  assert.strictEqual(ok.ok, true);
-  assert.strictEqual(describeLayout(1234).ok, false);
+test('decode rejects wrong sizes and non-state bytes', async () => {
   await assert.rejects(() => decodeState(new Uint8Array(64)), /gbAs/);
   await assert.rejects(async () => { new MgbaState(new Uint8Array(1000)); }, /unexpected state size/);
 });

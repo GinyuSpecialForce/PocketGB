@@ -156,17 +156,31 @@ test('RUP: applying to the patched ROM unpatches it (undo direction)', () => {
 });
 
 // ---- PPF ----
-function buildPpf(version, records, { undo = false, diz = '' } = {}) {
+// Builder follows the real PPF layout (ApplyPPF3.c): v2 embeds a u32 size +
+// mandatory 1024-byte block check (records at 1084); v3 embeds the flag bytes
+// and only carries the block when blockCheck is set (records at 60 or 1084).
+// The block is copied from rom[0x9320..+1024], so block-check tests need a
+// rom of at least 0x9320+1024 bytes.
+function buildPpf(version, records, { undo = false, diz = '', rom = null, blockCheck = false } = {}) {
   const head = [];
   head.push(...'PPF'.split('').map((c) => c.charCodeAt(0)));
   head.push(...(version * 10).toString().split('').map((c) => c.charCodeAt(0)));
   head.push(version - 1);
   for (let i = 0; i < 50; i++) head.push(0);
+  if (version === 2) {
+    // u32 LE original size, then the required block check
+    const len = rom ? rom.length : 0;
+    head.push(len & 0xFF, (len >>> 8) & 0xFF, (len >>> 16) & 0xFF, (len >>> 24) & 0xFF);
+    for (let k = 0; k < 1024; k++) head.push(rom ? rom[0x9320 + k] : 0);
+  }
   if (version === 3) {
-    head.push(0); // imageType
-    head.push(0); // blockCheck
-    head.push(undo ? 1 : 0);
+    head.push(0); // imageType (BIN)
+    head.push(blockCheck ? 1 : 0); // blockCheck
+    head.push(undo ? 1 : 0); // undo
     head.push(0); // dummy
+    if (blockCheck) {
+      for (let k = 0; k < 1024; k++) head.push(rom ? rom[0x9320 + k] : 0);
+    }
   }
   const body = [];
   for (const r of records) {
@@ -197,16 +211,33 @@ test('PPF v3: records patch the ROM', () => {
   assert.strictEqual(r.bytes[5], rom[5]);
 });
 
-test('PPF v1 and v2 (no u64, no undo) apply records', () => {
+test('PPF v1 and v2 apply records', () => {
   const rom = Uint8Array.from({ length: 16 }, (_, i) => i);
   const p1 = buildPpf(1, [{ offset: 2, data: [0x9A] }]);
   const r1 = applyPatch(rom, p1);
   assert.ok(r1.ok && r1.format === 'PPF');
   assert.strictEqual(r1.bytes[2], 0x9A);
-  const p2 = buildPpf(2, [{ offset: 2, data: [0x9B] }]);
-  const r2 = applyPatch(rom, p2);
-  assert.ok(r2.ok && r2.format === 'PPF');
+  // v2 records start at 1084 (u32 size + mandatory block check first) and the
+  // block is validated against rom[0x9320..] — needs a full-size image.
+  const bigRom = Uint8Array.from({ length: 0x9320 + 1024 + 32 }, (_, i) => (i * 7) & 0xFF);
+  const p2 = buildPpf(2, [{ offset: 2, data: [0x9B] }], { rom: bigRom });
+  const r2 = applyPatch(bigRom, p2);
+  assert.ok(r2.ok && r2.format === 'PPF', r2 && r2.error);
   assert.strictEqual(r2.bytes[2], 0x9B);
+});
+
+test('PPF v2/v3 block check rejects a wrong-base ROM', () => {
+  const bigRom = Uint8Array.from({ length: 0x9320 + 1024 + 32 }, (_, i) => (i * 7) & 0xFF);
+  const p2 = buildPpf(2, [{ offset: 2, data: [0x9B] }], { rom: bigRom });
+  const wrong = Uint8Array.from(bigRom); wrong[0x9320 + 5] ^= 0xFF;
+  const bad = applyPatch(wrong, p2);
+  assert.ok(!bad.ok, 'v2 block mismatch must reject');
+  const p3 = buildPpf(3, [{ offset: 2, data: [0x9C] }], { rom: bigRom, blockCheck: true });
+  const bad3 = applyPatch(wrong, p3);
+  assert.ok(!bad3.ok, 'v3 block mismatch must reject');
+  const good3 = applyPatch(bigRom, p3);
+  assert.ok(good3.ok && good3.format === 'PPF', good3 && good3.error);
+  assert.strictEqual(good3.bytes[2], 0x9C);
 });
 
 test('PPF v3 with undo data reverses an already-patched ROM', () => {

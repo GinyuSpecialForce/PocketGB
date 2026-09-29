@@ -63,3 +63,30 @@ test('send with no peer is a safe no-op', () => {
   assert.doesNotThrow(() => a.send(0x12));
   assert.doesNotThrow(() => a.stop());
 });
+
+test('join() rejects (not hangs) when the socket closes before connect', async () => {
+  // Nothing listens on this port; some stacks surface a refused connection
+  // as close-without-error. Either way join() must settle.
+  const a = new NetLink();
+  const deadPort = await new Promise((resolve, reject) => {
+    const s = require('net').createServer();
+    s.on('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const port = s.address().port;
+      s.close(() => resolve(port)); // fully closed before we try to join
+    });
+  });
+  await assert.rejects(a.join(deadPort, '127.0.0.1'), (err) => {
+    const msg = String((err && err.message) || err);
+    return /closed before established|ECONNREFUSED/i.test(msg);
+  }, 'join must settle, never hang');
+  assert.equal(a.status.connected, false);
+});
+
+test('stop() during a pending join() rejects instead of hanging', async () => {
+  const a = new NetLink();
+  const p = a.join(1, '127.0.0.1'); // port 1: nothing there, connect pends
+  setTimeout(() => a.stop(), 15);
+  await assert.rejects(p, 'pending join settles after stop()');
+  assert.equal(a.status.connected, false);
+});

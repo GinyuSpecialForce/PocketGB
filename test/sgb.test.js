@@ -110,15 +110,50 @@ test('CHR_TRN latches tile halves and marks the border dirty', () => {
   const sgb = new SGB();
   const block = new Uint8Array(4096);
   block[5] = 0xAB;
-  sgb.pendingTrn = 'chr-bg';
+  sgb.pendingTrn = 'chr-lo';
   sgb.consumeVramBlock(block);
   assert.strictEqual(sgb.borderTiles[5], 0xAB);
   assert.strictEqual(sgb.borderDirty, true);
   sgb.borderDirty = false;
   block[5] = 0xCD;
-  sgb.pendingTrn = 'chr-obj'; // second half (tiles 128-255; same bank per docs)
+  sgb.pendingTrn = 'chr-hi'; // second half (tiles 128-255)
   sgb.consumeVramBlock(block);
   assert.strictEqual(sgb.borderTiles[128 * 32 + 5], 0xCD);
+  // The command packet (not just the manual latch) must select the half via
+  // param bit 0: real two-call border transfers send tiles 00h-7Fh then
+  // 80h-FFh; using the wrong bit used to overwrite the first half.
+  sendPacket(sgb, packet(0x13, 1, new Uint8Array([0x01])));
+  block[5] = 0xEE;
+  sgb.consumeVramBlock(block);
+  assert.strictEqual(sgb.borderTiles[128 * 32 + 5], 0xEE, 'bit0=1 → tiles 128-255');
+  sendPacket(sgb, packet(0x13, 1, new Uint8Array([0x00])));
+  block[5] = 0xFF;
+  sgb.consumeVramBlock(block);
+  assert.strictEqual(sgb.borderTiles[5], 0xFF, 'bit0=0 → tiles 0-127');
+});
+
+test('PAL_SET applies the attribute file when byte 9 bit 7 is set', () => {
+  const sgb = new SGB();
+  // Build ATF 2 with a recognizable pattern via ATTR_TRN block.
+  const block = new Uint8Array(4096);
+  block[2 * 90] = 0xC0; // ATF2 tile (0,0) = palette 3 (top two bits)
+  block[2 * 90 + 1] = 0x00;
+  sgb.pendingTrn = 'attr';
+  sgb.consumeVramBlock(block);
+  // PAL_SET with ATF bit 7 set
+  sendPacket(sgb, packet(0x0A, 1, new Uint8Array([0, 0, 1, 0, 2, 0, 3, 0, 0x82])));
+  assert.strictEqual(sgb.attrMap[0], 3, 'ATF 2 applied to the attribute map');
+  // Same command without bit 7 must NOT touch the attribute map
+  sendPacket(sgb, packet(0x0A, 1, new Uint8Array([0, 0, 1, 0, 2, 0, 3, 0, 0x02])));
+  assert.strictEqual(sgb.attrMap[0], 3, 'unrelated command left the map alone');
+  // ...and bit 6 alone only cancels the screen mask — it does not re-apply
+  // any ATF (an ATF# of 0 with bit 7 WOULD reset the map, via ATTR_SET n=0
+  // semantics — a different command).
+  sendPacket(sgb, packet(0x0A, 1, new Uint8Array([0, 0, 1, 0, 2, 0, 3, 0, 0x40])));
+  assert.strictEqual(sgb.attrMap[0], 3, 'cancel-mask-only PAL_SET leaves the map as-is');
+  // ATTR_SET n=0 is the command that actually clears the map back to palette 0.
+  sendPacket(sgb, packet(0x16, 1, new Uint8Array([0x00])));
+  assert.strictEqual(sgb.attrMap[0], 0, 'ATTR_SET n=0 clears the attribute map');
 });
 
 test('bgr555to888 expands channels with bit replication', () => {

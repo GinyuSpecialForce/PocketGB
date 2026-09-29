@@ -53,3 +53,11 @@ test('buildSpawnArgs: rom-less and role-less launches still mark second', () => 
   const args = buildSpawnArgs({ baseArgs: ['app'] });
   assert.deepStrictEqual(args, ['app', '--pgb-second']);
 });
+
+test('childRole: spawned window takes the OPPOSITE end of the cable', () => {
+  const { childRole } = require('../src/main/hub');
+  assert.strictEqual(childRole('host'), 'join', 'parent hosts → child joins the parent\'s port');
+  assert.strictEqual(childRole('join'), 'host', 'parent joins → child hosts');
+  assert.strictEqual(childRole(null), null, 'no parent role → child raises nothing automatically');
+  assert.strictEqual(childRole('bogus'), null);
+});

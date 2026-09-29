@@ -69,6 +69,51 @@ test('GBA shoulder buttons round-trip through the mask (bits 8/9)', () => {
   assert.strictEqual(stateToMask(maskToState(0xFF)), 0xFF);
 });
 
+test('GBA L/R survive record → serialize → load → replay (shoulder bits not dropped)', () => {
+  // Regression: observe() used to mask & 0xFF, silently discarding bits 8/9
+  // (GBA L/R) even though the v2 format stores a 2-byte, 10-bit mask.
+  const gb = newGB();
+  const rec = new MovieRecorder();
+  rec.start(gb);
+  const shoulderMask = (1 << 0) | (1 << 8) | (1 << 9); // A + L + R
+  rec.observe(shoulderMask);
+  rec.observe(1 << 8); // L only
+  rec.observe(1 << 9); // R only
+  const bytes = rec.stop();
+
+  const player = new MoviePlayer();
+  assert.strictEqual(player.load(bytes, gb), null);
+  assert.strictEqual(player.start(gb), null);
+  const seen = [];
+  let m;
+  while ((m = player.next()) !== null) seen.push(m);
+  assert.deepStrictEqual(seen, [shoulderMask, 1 << 8, 1 << 9], 'shoulder bits must survive the round-trip');
+  // And they map back to real joypad state on replay
+  assert.deepStrictEqual(maskToState(seen[0]), { a: true, b: false, select: false, start: false,
+    right: false, left: false, up: false, down: false, l: true, r: true });
+});
+
+test('progress is a 0..1 fraction over frames, not bytes (caps at 1, not 2)', () => {
+  // Regression: pos advances 2 per frame (byte offset) while total is a frame
+  // count, so pos/total ran to 2.0 at the end of playback.
+  const gb = newGB();
+  const rec = new MovieRecorder();
+  rec.start(gb);
+  const N = 4;
+  for (let i = 0; i < N; i++) rec.observe(0);
+  const bytes = rec.stop();
+
+  const player = new MoviePlayer();
+  assert.strictEqual(player.load(bytes, gb), null);
+  assert.strictEqual(player.start(gb), null);
+  assert.strictEqual(player.progress, 0, 'starts at 0');
+  for (let i = 1; i <= N; i++) {
+    assert.notStrictEqual(player.next(), null);
+    assert.ok(Math.abs(player.progress - i / N) < 1e-9, `progress after ${i}/${N} frames = ${player.progress}`);
+  }
+  assert.strictEqual(player.progress, 1, 'caps at 1.0 after the last frame');
+});
+
 test('movieRomId is stable and content-sensitive', () => {
   const gb = newGB();
   const id1 = movieRomId(gb);

@@ -192,3 +192,28 @@ test('input echo: divergence tracking and echo mask', () => {
   assert.equal(racer.divergedFromRecording, false);
   assert.equal(racer.echoMask, 0b00000001);
 });
+
+test('divergence ignores GBA shoulder bits (bits 8/9) — GB pad match is what counts', () => {
+  // Regression: v2 recordings may carry L/R in bits 8/9. The app masks the
+  // live mask to 0xFF before step() (GB has no shoulders), so a raw-width
+  // compare would flag shoulder bits as divergence even on a perfect match.
+  const me = new FakeGB(9);
+  const rec = new MovieRecorder();
+  rec.start(me);
+  rec.observe(0b00000001 | (1 << 8) | (1 << 9)); // A + L + R
+  rec.observe(0b00000010 | (1 << 8));            // B + L
+  rec.observe(0b00000001);                        // A
+  const bytes = rec.stop();
+  const racer = new GhostRacer(me, FakeGB);
+  assert.equal(racer.load(bytes), null);
+  assert.equal(racer.startNow(), null);
+  // Player presses the same GB buttons; shoulders stripped by the app.
+  racer.step(0b00000001);
+  assert.equal(racer.divergedFromRecording, false, 'GB pad match must not diverge on shoulder bits');
+  racer.step(0b00000010);
+  assert.equal(racer.divergedFromRecording, false, 'still matching on GB pad bits');
+  // A genuine GB-pad difference (ghost pressed A, player pressed nothing) diverges.
+  racer.step(0b00000000);
+  assert.equal(racer.divergedFromRecording, true, 'real GB-pad mismatch still diverges');
+  assert.equal(racer.divergenceFrame, 2);
+});

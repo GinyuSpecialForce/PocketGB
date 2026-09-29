@@ -153,3 +153,37 @@ test('GameShark write lands in WRAM through the real MMU', () => {
   gb.cheats.applyRAM(gb.mmu);
   assert.strictEqual(gb.mmu.read(0xC040), 0xFF);
 });
+
+// ---- duplicate handling (playtest: freeze mash / re-paste) ----
+
+test('GB engine treats an identical code as a duplicate, not a second entry', () => {
+  const { CheatEngine } = require('../src/core/cheats');
+  const ce = new CheatEngine();
+  const r1 = ce.add('010238CD');
+  assert.ok(!r1.error && !r1.duplicate);
+  const r2 = ce.add('010238CD');   // exact same string
+  assert.strictEqual(r2.duplicate, true);
+  assert.strictEqual(ce.gsCodes.length, 1);
+  const r3 = ce.add('01 02 38 CD'); // whitespace variant → same code
+  assert.strictEqual(r3.duplicate, true);
+  assert.strictEqual(ce.gsCodes.length, 1);
+  const r4 = ce.add('010738CD');   // same address, different value → new code
+  assert.ok(!r4.duplicate);
+  assert.strictEqual(ce.gsCodes.length, 2);
+});
+
+test('GBA engine treats an identical code as a duplicate, not a second entry', () => {
+  const { GbaCheatList } = require('../src/core/cheats');
+  const l = new GbaCheatList();
+  const r1 = l.add('0203785A:63');
+  assert.ok(!r1.error && !r1.duplicate);
+  const r2 = l.add('0203785A:63');
+  assert.strictEqual(r2.duplicate, true);
+  assert.strictEqual(l.codes.length, 1);
+  const r3 = l.add('0203785a:63'); // case-insensitive (input is uppercased)
+  assert.strictEqual(r3.duplicate, true);
+  assert.strictEqual(l.codes.length, 1);
+  const r4 = l.add('0203785A:64'); // different value → distinct code
+  assert.ok(!r4.duplicate);
+  assert.strictEqual(l.codes.length, 2);
+});
