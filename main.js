@@ -27,7 +27,14 @@ protocol.registerSchemesAsPrivileged([
 const savesDir = () => { const d = path.join(userDir(), 'saves'); fs.mkdirSync(d, { recursive: true }); return d; };
 const statesDir = () => { const d = path.join(userDir(), 'states'); fs.mkdirSync(d, { recursive: true }); return d; };
 const shotsDir = () => { const d = path.join(userDir(), 'shots'); fs.mkdirSync(d, { recursive: true }); return d; };
-const gameShotsDir = (key) => { const d = path.join(shotsDir(), path.basename(String(key))); fs.mkdirSync(d, { recursive: true }); return d; };
+// path.basename strips separators, but a bare '.' or '..' key would still
+// climb out of shots/ — reject it here so every shot/cover handler is confined
+// (they all funnel through this and already catch the throw).
+const gameShotsDir = (key) => {
+  const safe = path.basename(String(key));
+  if (!safe || safe === '.' || safe === '..') throw new Error('bad key');
+  const d = path.join(shotsDir(), safe); fs.mkdirSync(d, { recursive: true }); return d;
+};
 const coversDir = () => { const d = path.join(userDir(), 'covers'); fs.mkdirSync(d, { recursive: true }); return d; };
 const SHOTS_KEEP = 100; // per-game screenshot history cap
 
@@ -57,6 +64,11 @@ const { NetLink } = require('./src/core/netlink');
 let link = null;
 function getLink() {
   if (!link) {
+    // Peer bytes must reach the Game Boy's serial side or netplay is
+    // half-duplex (our bytes go out, the peer's vanish). Buffer them here and
+    // batch one IPC send per 8ms tick instead of one round-trip per byte —
+    // the Serial layer is byte-oriented, so a burst arriving together is fine.
+    const linkInbox = [];
     link = new NetLink({
       onStatus: (st) => {
         send('link-status', st);
@@ -64,7 +76,11 @@ function getLink() {
         send('link-hosting', st.hosting ? (st.port || 0) : 0);
       },
       onError: (msg) => send('link-error', msg),
+      onByte: (b) => linkInbox.push(b),
     });
+    setInterval(() => {
+      if (linkInbox.length) { send('link-data', Uint8Array.from(linkInbox)); linkInbox.length = 0; }
+    }, 8);
   }
   return link;
 }
@@ -669,22 +685,33 @@ app.whenReady().then(() => {
   // instance auto-loads the ROM and raises its end of the link cable. The
   // first window hosts when the user asks for player-2 — hosting with port 0
   // lets the OS pick a free loopback port, so "2-player" just works.
-  const { parseHubArgs, buildSpawnArgs } = require('./src/main/hub');
+  const { parseHubArgs, buildSpawnArgs, childRole } = require('./src/main/hub');
   ipcMain.handle('hub-spawn', async (e, { rom, role, port } = {}) => {
     try {
       if (rom && (typeof rom !== 'string' || !path.isAbsolute(rom) || !fs.existsSync(rom))) {
         return { ok: false, error: 'bad rom path' };
       }
       if (role && role !== 'host' && role !== 'join') return { ok: false, error: 'bad role' };
-      // Host: bind now so we know the port the second window will join.
+      // The role is the PARENT's end of the cable. 'host': bind now so the
+      // child can join a known port; the child gets the opposite role
+      // (childRole) — passing 'host' through used to make the child host the
+      // same port → EADDRINUSE and no connection. 'join': the child must HOST
+      // on a fixed port, otherwise nobody ever listens and join fails.
       let hostPort = Number(port) || 0;
+      let childArgsRole = null;
+      let childPort = 0;
       if (role === 'host') {
         const st = await getLink().host(hostPort, { lan: false });
         hostPort = st.port || hostPort;
+        childArgsRole = 'join';
+        childPort = hostPort;
+      } else if (role === 'join') {
+        childArgsRole = 'host';
+        childPort = hostPort || 8765; // child hosts where the parent will join
       }
       // Anchor the app path explicitly: `electron .` resolves argv[1]
       // relative to the child's cwd, which is not our project dir.
-      const args = buildSpawnArgs({ baseArgs: [app.getAppPath()], rom: rom || null, role: role || null, port: hostPort });
+      const args = buildSpawnArgs({ baseArgs: [app.getAppPath()], rom: rom || null, role: childArgsRole, port: childPort });
       const { spawn } = require('child_process');
       const child = spawn(process.execPath, args, {
         cwd: path.dirname(process.execPath),
