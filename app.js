@@ -377,7 +377,8 @@ $('btn-movie-rec').addEventListener('click', () => {
   if (movieRecorder.recording) {
     const bytes = movieRecorder.stop();
     const b64 = btoa(String.fromCharCode(...bytes));
-    window.pocketgb.saveFile(`${(!titleLooksBroken(romInfo.title) ? romInfo.title : 'movie').replace(/[^\w ]/g, '_')}-${Math.floor(framesThisSecond)}.pgm`, b64).then((p) => {
+    // filename carries the recorded frame count (framesThisSecond is just the fps readout)
+    window.pocketgb.saveFile(`${(!titleLooksBroken(romInfo.title) ? romInfo.title : 'movie').replace(/[^\w ]/g, '_')}-${movieRecorder.frames.length}.pgm`, b64).then((p) => {
       if (p) setStatus(`movie saved (${bytes.length} B)`);
     });
     $('btn-movie-rec').textContent = 'record movie';
@@ -856,7 +857,7 @@ async function loadRom(info) {
   // app's backspace rewind is a GB/CGB feature until the core is leaner.
   rewind.reset();
   rewind.setRewindable(!gb.isGba);
-  retargetFinder();
+  if (cheatFinder) cheatFinder.retarget();
   romLoaded = true;
   paused = false;
   rewinding = false;
@@ -1967,6 +1968,9 @@ async function openClockPanel() {
   $('clock-readout').textContent = fmtClock(gb.cart.getRtcTime());
   clearInterval(clockTickTimer);
   clockTickTimer = setInterval(() => {
+    // Self-heal: every close path (Escape, overlay switch, button re-toggle)
+    // lands here within a tick — without this the interval outlives the panel.
+    if (!$('ov-clock').classList.contains('open')) { clearInterval(clockTickTimer); clockTickTimer = null; return; }
     if (romLoaded && gb.cart && gb.cart.hasRtc) $('clock-readout').textContent = fmtClock(gb.cart.getRtcTime());
   }, 1000);
 }
@@ -2033,7 +2037,7 @@ $('btn-cheats').addEventListener('click', () => {
 });
 $('btn-finder').addEventListener('click', () => {
   // visible limitation notice instead of a transient status-line message
-  $('finder-gba-note').classList.toggle('hidden', !(gb.isGba && !gb.hasMemoryAccess));
+  if (cheatFinder) cheatFinder.attachNoteForMenu();
   toggleOverlay('ov-finder');
 });
 $('btn-effects').addEventListener('click', () => toggleOverlay('ov-effects'));
@@ -2164,230 +2168,24 @@ $('cheat-clear').addEventListener('click', () => {
 $('cheat-db').addEventListener('click', cheatDbLookup);
 $('cheat-close').addEventListener('click', () => toggleOverlay('ov-cheats'));
 
-// ---- cheat finder (RAM scanner → GameShark freeze / GBA RAM freeze) ----
-// GB/CGB scans the in-process MMU. GBA memory is capability-detected: with
-// the stock mGBA build it reports no memory access (clear message); if a
-// memory-capable core is dropped in, the GBA RAM map is scanned and freezes
-// ride the core every frame.
-let finder = window.PocketCheat ? new window.PocketCheat.CheatFinder(() => gb.mmu) : null;
-const GBA_SCAN_RANGES = [
-  [0x02000000, 0x02040000], // EWRAM
-  [0x03000000, 0x03008000], // IWRAM
-];
-// The GBA scan address set is fixed — build it once as a typed array
-// (288K entries; a fresh Array every scan would churn the GC).
-const GBA_SCAN_ADDRS = (() => {
-  const n = (0x02040000 - 0x02000000) + (0x03008000 - 0x03000000);
-  const a = new Uint32Array(n);
-  let i = 0;
-  for (let x = 0x02000000; x < 0x02040000; x++) a[i++] = x;
-  for (let x = 0x03000000; x < 0x03008000; x++) a[i++] = x;
-  return a;
-})();
-// GBA has two finder modes. With a memory-capable core, scans read live RAM
-// and freezes are in-process. The bundled stock core exposes no memory
-// access, so there the finder runs in SNAPSHOT mode: it decodes EWRAM/IWRAM
-// out of freshly saved mGBA states (fixed layout — see mgba-state.js) and a
-// freeze is promoted to a VBA-format cheat code that mGBA applies itself.
-function gbaFinderSnapshotMode() {
-  return !!(gb.isGba && gb._gba && !gb.hasMemoryAccess && window.PocketMgbaState);
-}
-let finderBusy = false; // one scan/narrow at a time (snapshot decode ≈ 50ms)
-function finderAvailable() {
-  if (!romLoaded) return true;
-  if (gb.isGba) {
-    if (gb.hasMemoryAccess) return true;
-    if (gbaFinderSnapshotMode()) return true;
-    setStatus('cheat finder needs GBA memory access — the bundled mGBA build does not expose it');
-    return false;
-  }
-  if (!gb.hasMemoryAccess) { setStatus('load a game first'); return false; }
-  return true;
-}
-// Re-target the finder when the console changes between loads.
-function retargetFinder() {
-  if (!finder) return;
-  const note = $('finder-gba-note');
-  finder.reset();
-  finder.watches = [];
-  if (gb.isGba && gb._gba && gb.hasMemoryAccess) {
-    // live mode: memory-capable core
-    finder.snapshotMode = false;
-    finder.addressProvider = () => {
-      const addrs = [];
-      for (const [lo, hi] of GBA_SCAN_RANGES) for (let a = lo; a < hi; a++) addrs.push(a);
-      return addrs;
-    };
-    finder.gbaMachine = () => gb._gba;
-    if (note) note.classList.add('hidden');
-  } else if (gbaFinderSnapshotMode()) {
-    // snapshot mode: reads come from decoded save states
-    finder.snapshotMode = true;
-    finder.addressProvider = () => GBA_SCAN_ADDRS;
-    finder.snapshotProvider = async () => {
-      const png = gb._gba.saveState(); // PNG bytes; throws before the first frame
-      return window.PocketMgbaState.decodeState(png);
-    };
-    finder.snapshotReader = (state, addr) => state.readBus(addr);
-    finder.gbaMachine = null;
-    if (note) {
-      note.textContent = 'GBA snapshot mode: the bundled mGBA core exposes no live memory, so scans read save states — search, play, then narrow until a few addresses remain. Freeze adds a VBA-format cheat code the core applies itself (values refresh on each scan/narrow).';
-      note.classList.remove('hidden');
-    }
-  } else {
-    finder.snapshotMode = false;
-    finder.addressProvider = null;
-    finder.gbaMachine = null;
-    if (note) note.classList.toggle('hidden', !(gb.isGba && !gb.hasMemoryAccess));
-  }
-}
-// Finder reads go through the GBA machine's peek when present; the stub
-// mmu.read would return 0xFF for everything. Snapshot mode reads the last
-// decoded state.
-function finderRead(addr) {
-  if (gb.isGba && gb._gba && gb.hasMemoryAccess) return gb._gba.readMemory(addr);
-  if (gb.isGba && finder && finder.snapshotMode) return finder.read(addr);
-  return gb.mmu.read(addr);
-}
-function parseFinderValue(raw) {
-  const s = String(raw || '').trim().toLowerCase();
-  if (!s) return null;
-  if (/^0x[0-9a-f]+$/.test(s) || /^[0-9a-f]{1,2}$/.test(s)) return parseInt(s.replace(/^0x/, ''), 16);
-  if (/^\d{1,3}$/.test(s)) return parseInt(s, 10);
-  return NaN; // malformed → distinct from "empty"
-}
-function renderFinderList() {
-  const list = $('finder-list');
-  const err = $('finder-err');
-  err.textContent = '';
-  if (!finder || !finder.candidates) { list.textContent = 'no search yet'; return; }
-  list.textContent = '';
-  const entries = [...finder.candidates.entries()].slice(0, 200);
-  if (!entries.length) { list.textContent = 'no candidates — reset and try again'; return; }
-  for (const [addr] of entries) {
-    const row = document.createElement('div');
-    row.className = 'finder-row';
-    const val = finderRead(addr);
-    const a = document.createElement('span');
-    a.textContent = `$${addr.toString(16).toUpperCase().padStart(8, '0')} = ${val.toString(16).padStart(2, '0')} (${val})`;
-    const freeze = document.createElement('button');
-    freeze.className = 'sbutton'; freeze.textContent = 'freeze';
-    freeze.title = !gb.isGba
-      ? 'add a GameShark code that holds this address at its current value'
-      : (gb.hasMemoryAccess
-        ? 'hold this GBA address at its current value (live RAM freeze)'
-        : 'add a VBA-format cheat code that holds this address at its current value');
-    freeze.addEventListener('click', () => {
-      let r;
-      if (gb.isGba && !gb.hasMemoryAccess) {
-        // snapshot mode: promote to a VBA code (XXXXXXXX:YY) in the cheat
-        // list — mGBA applies it every frame; the value is the last one the
-        // scan saw at this address.
-        const v = finderRead(addr) & 0xFF;
-        const code = `${addr.toString(16).toUpperCase().padStart(8, '0')}:${v.toString(16).toUpperCase().padStart(2, '0')}`;
-        r = gb.cheats.add(code);
-        if (r && !r.error) { persistCheats(); renderCheatList(); applyGbaCheats(); }
-      } else {
-        const target = gb.isGba && gb._gba ? { freeze: (ad, v) => gb._gba.freezeRam(ad, v) } : gb.cheats;
-        r = finder.freeze(addr, target);
-        if (r && !r.error) { persistCheats(); renderCheatList(); }
-      }
-      if (r && !r.error) setStatus(`froze $${addr.toString(16).toUpperCase().padStart(gb.isGba ? 8 : 4, '0')} — see cheats`);
-      else err.textContent = (r && r.error) || 'freeze failed';
-    });
-    const watch = document.createElement('button');
-    watch.className = 'sbutton'; watch.textContent = 'watch';
-    watch.title = 'poll this address live in the watch list';
-    watch.addEventListener('click', () => {
-      if (!finder.watches.some((w) => w.addr === addr)) finder.watches.push({ addr });
-      renderFinderWatches();
-    });
-    row.appendChild(a); row.appendChild(watch); row.appendChild(freeze);
-    list.appendChild(row);
-  }
-  if (finder.candidates.size > 200) {
-    const more = document.createElement('div');
-    more.className = 'hint';
-    more.textContent = `…and ${finder.candidates.size - 200} more — narrow further`;
-    list.appendChild(more);
-  }
-}
-function renderFinderWatches() {
-  const list = $('finder-list');
-  let watchBox = document.getElementById('finder-watches');
-  if (!finder.watches.length) { if (watchBox) watchBox.remove(); return; }
-  if (!watchBox) {
-    watchBox = document.createElement('div');
-    watchBox.id = 'finder-watches';
-    list.parentElement.insertBefore(watchBox, list);
-  }
-  watchBox.textContent = '';
-  for (const w of finder.watches) {
-    const row = document.createElement('div');
-    row.className = 'finder-row watch';
-    const val = finderRead(w.addr);
-    const label = document.createElement('span');
-    label.textContent = `watch $${w.addr.toString(16).toUpperCase().padStart(gb.isGba ? 8 : 4, '0')} = ${val} (0x${val.toString(16).padStart(2, '0')})`;
-    const un = document.createElement('button'); un.className = 'sbutton'; un.textContent = 'unwatch';
-    un.addEventListener('click', () => { finder.watches = finder.watches.filter((x) => x.addr !== w.addr); renderFinderWatches(); });
-    row.appendChild(label); row.appendChild(un);
-    watchBox.appendChild(row);
-  }
-}
-setInterval(() => { if ($('ov-finder').classList.contains('open')) renderFinderWatches(); }, 250);
-$('finder-search').addEventListener('click', async () => {
-  if (!finderAvailable() || !finder || finderBusy) return;
-  const v = parseFinderValue($('finder-input').value);
-  if (v === null || Number.isNaN(v) || v < 0 || v > 255) { $('finder-err').textContent = 'enter 0-255 (decimal or 0x hex), or use unknown init'; return; }
-  await runFinderStep(() => finder.search(v), `search: ${'${n}'} candidates = ${v}`);
-});
-$('finder-unknown').addEventListener('click', async () => {
-  if (!finderAvailable() || !finder || finderBusy) return;
-  await runFinderStep(() => finder.search(null), `search: all ${'${n}'} addresses (unknown init)`);
-});
-// Shared scan/narrow runner: snapshot-mode steps decode a save state (~50ms)
-// and can fail (no state yet) — serialize, report errors in the panel, and
-// keep the old render order (status text, then list).
-async function runFinderStep(step, message) {
-  finderBusy = true;
-  try {
-    if (finder.snapshotMode) setStatus('reading save state…');
-    const n = await step();
-    setStatus(message.replace('${n}', String(n)));
-    renderFinderList();
-  } catch (e) {
-    $('finder-err').textContent = 'finder: ' + (e && e.message ? e.message : e);
-  } finally {
-    finderBusy = false;
-  }
-}
-$('finder-narrow').addEventListener('click', () => {
-  const row = $('finder-narrow-row'), hint = $('finder-narrow-hint');
-  const show = row.style.display === 'none';
-  row.style.display = show ? 'flex' : 'none';
-  hint.style.display = show ? 'block' : 'none';
-});
-$('finder-apply').addEventListener('click', async () => {
-  if (!finderAvailable() || !finder || finderBusy) return;
-  if (!finder.candidates) { $('finder-err').textContent = 'search first'; return; }
-  const op = $('finder-op').value;
-  if (op === 'changed' || op === 'unchanged') {
-    await runFinderStep(() => finder.narrow({ op }), `narrow (${op}): ${'${n}'} candidates`);
-    return;
-  }
-  const v = parseFinderValue($('finder-narrow-val').value);
-  if (v === null || Number.isNaN(v) || v < 0 || v > 255) { $('finder-err').textContent = 'enter 0-255 for this filter'; return; }
-  await runFinderStep(() => finder.narrow({ op, value: v }), `narrow: ${'${n}'} candidates`);
-});
-$('finder-reset').addEventListener('click', () => {
-  if (!finderAvailable()) return;
-  if (!finder) return;
-  finder.reset(); finder.watches = [];
-  $('finder-list').textContent = 'no search yet';
-  renderFinderWatches();
-  setStatus('finder reset');
-});
-$('finder-close').addEventListener('click', () => toggleOverlay('ov-finder'));
+// ---- cheat finder panel (src/ui/cheat-finder.js) ----
+// GB/CGB scans the in-process MMU; GBA memory is capability-detected there
+// (live scan on a memory-capable core, save-state snapshot mode otherwise).
+// The panel controller is injected with the app services it needs.
+const cheatFinder = window.PocketCheatFinder ? new window.PocketCheatFinder.CheatFinderPanel({
+  gb,
+  $,
+  setStatus,
+  persistCheats,
+  renderCheatList,
+  applyGbaCheats,
+  toggleOverlay,
+  CheatFinder: window.PocketCheat && window.PocketCheat.CheatFinder,
+  parseGbaCheatLine: window.PocketCheat && window.PocketCheat.parseGbaCheatLine,
+  decodeState: window.PocketMgbaState && window.PocketMgbaState.decodeState,
+  romLoaded: () => romLoaded,
+}) : null;
+if (cheatFinder) cheatFinder.startTicker();
 
 // ---- practice panel controls ----
 $('btn-practice').addEventListener('click', () => {
