@@ -393,9 +393,12 @@ class Renderer {
       if (!this.prevPx) this.prevPx = new Uint32Array(px.length);
       this.prevPx.set(px);
     }
+    } // end non-SGB blit path
+    // Upload for BOTH paths: the SGB branch writes this.px too, and present()
+    // draws the offscreen canvas — without this, an SGB game would show a
+    // stale frame forever.
     this.octx.putImageData(this.imageData, 0, 0);
     this.frameCount++;
-    } // end non-SGB blit path
     // Ghost racer picture-in-picture: drawn to its OWN canvas panel beside
     // the game (see index.html #ghost-pip) — never over the game display.
     // capture.observe() receives the raw game framebuffer, so GIF/WebM/movies

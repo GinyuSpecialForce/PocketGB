@@ -24,7 +24,13 @@ const _gbaHeaderValid = (typeof gbaHeaderValid !== 'undefined') ? gbaHeaderValid
 // specific machine. GB/CGB always yes; GBA only when the wasm core exposes
 // peek/poke (the vendored build does not — a rebuilt core lights GBA up).
 function hasMemoryAccess() {
-  if (this._gba) return typeof this._gba.hasMemoryAccess === 'function' ? this._gba.hasMemoryAccess : false;
+  if (this._gba) {
+    // The machine exposes the probe as a boolean getter (gba-mgba.js). The old
+    // `typeof === 'function' ? … : false` misread the boolean case as "no
+    // access", keeping GBA cheat-finder/RA dark even on a rebuilt core.
+    const probe = this._gba.hasMemoryAccess;
+    return typeof probe === 'function' ? !!probe.call(this._gba) : !!probe;
+  }
   return !!(this.cart && this.mmu && this.mmu.read);
 }
 
@@ -134,9 +140,14 @@ class GameBoy {
     // linked to the live joypad so resets never orphan it.
     this.sgb = (!cgb && this.cart.rom[0x146] === 0x03 && this.cart.rom[0x14B] === 0x33) ? new _SGB() : null;
     if (this.sgb) { this.joypad.sgb = this.sgb; }
-    if (this.cart.mbc7) {
-      const _Mbc7 = (typeof Mbc7 !== 'undefined') ? Mbc7 : require('./mbc7').Mbc7;
-      this.cart.mbc7 = new _Mbc7();
+    // MBC7 (Kirby Tilt'n'Tumble): cartridge.js may have evaluated before
+    // mbc7.js defined its global (classic script order — nodeIntegration is
+    // off, so no late require there), leaving the slot empty; late-bind it
+    // here. Never replace an existing instance, and ALWAYS pass the cart:
+    // the EEPROM command path reads/writes this.cart.ram.
+    if (!this.cart.mbc7 && this.cart.rom[0x147] === 0x20) {
+      const _Mbc7 = (typeof Mbc7 !== 'undefined') ? Mbc7 : (typeof require === 'function' ? require('./mbc7').Mbc7 : null);
+      if (_Mbc7) this.cart.mbc7 = new _Mbc7(this.cart);
     }
     this.reset();
     if (this.cart.cheats !== this.cheats)    this.cart.cheats = this.cheats;
@@ -148,11 +159,15 @@ class GameBoy {
   async attachGbaMachine() {
     if (!this._pendingGba) return;
     const { bytes, saveBytes } = this._pendingGba;
-    this._pendingGba = null;
-    if (typeof createMgbaMachine !== 'function') throw new Error('mGBA adapter not loaded');
+    // Await the core BEFORE clearing _pendingGba: while it boots, runFrame()
+    // must keep hitting the "core still booting" guard (blank frame) — with
+    // both _pendingGba and _gba null it would fall through to the GB frame
+    // path and throw on the stub CPU every rAF until the machine attaches.
+    if (typeof createMgbaMachine !== 'function') { this._pendingGba = null; throw new Error('mGBA adapter not loaded'); }
     const machine = await createMgbaMachine(this._gbaCanvas || document.createElement('canvas'));
     machine.loadROM(bytes, saveBytes);
     this._gba = machine;
+    this._pendingGba = null;
     this.cart = machine.cart;
     this.cpu = { pc: 0, halted: false, doubleSpeed: false, _gbaStub: true };
     this.ppu = machine.ppu;

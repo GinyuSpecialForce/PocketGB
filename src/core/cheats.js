@@ -136,16 +136,23 @@ class CheatEngine {
   }
 
   // Add a code in either format. Returns { type, ... } or { error }.
+  // A code that is already in the list (same device, address, value, compare)
+  // is not added twice — re-freezing the same hit is a no-op flagged with
+  // duplicate: true so the UI can say so.
   add(raw) {
     const text = String(raw).trim();
     const gs = parseGameShark(text);
     if (gs) {
+      const dup = this.gsCodes.find((c) => c.addr === gs.addr && c.value === gs.value);
+      if (dup) return { ...dup, duplicate: true };
       const entry = { kind: 'gs', code: text.toUpperCase(), enabled: true, ...gs };
       this.gsCodes.push(entry);
       return entry;
     }
     const gg = parseGameGenie(text);
     if (gg) {
+      const dup = this.ggCodes.find((c) => c.addr === gg.addr && c.value === gg.value && c.compare === gg.compare);
+      if (dup) return { ...dup, duplicate: true };
       const entry = { kind: 'gg', code: text.toUpperCase(), enabled: true, ...gg };
       this.ggCodes.push(entry);
       return entry;
@@ -180,14 +187,27 @@ class CheatEngine {
   }
 
   // Rebuild from serialized list (keeps persisted state across restarts).
+  // Duplicates are normalized away (see GbaCheatList.restore).
   restore(list) {
     this.clear();
+    const seen = new Set();
     for (const c of list || []) {
       if (!c || typeof c.code !== 'string') continue;
       const gs = parseGameShark(c.code);
-      if (gs) { this.gsCodes.push({ kind: 'gs', code: c.code.toUpperCase(), enabled: !!c.enabled, ...gs }); continue; }
+      if (gs) {
+        const key = `gs|${gs.addr}|${gs.value}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        this.gsCodes.push({ kind: 'gs', code: c.code.toUpperCase(), enabled: !!c.enabled, ...gs });
+        continue;
+      }
       const gg = parseGameGenie(c.code);
-      if (gg) this.ggCodes.push({ kind: 'gg', code: c.code.toUpperCase(), enabled: !!c.enabled, ...gg });
+      if (gg) {
+        const key = `gg|${gg.addr}|${gg.value}|${gg.compare}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        this.ggCodes.push({ kind: 'gg', code: c.code.toUpperCase(), enabled: !!c.enabled, ...gg });
+      }
     }
   }
 
@@ -225,6 +245,11 @@ class GbaCheatList {
     if (!parsed) {
       return { error: 'Not a valid GBA cheat code (GameShark/Pro Action Replay XXXXXXXX XXXXXXXX, CodeBreaker XXXXXXXX XXXX, or VBA XXXXXXXX:YY)' };
     }
+    // Identical codes (same format, address, value) are not stacked — the
+    // cheat-finder freeze button is easy to mash, and duplicates only make
+    // the list noisy (mGBA applies each set).
+    const dup = this.codes.find((c) => c.format === parsed.format && c.address === parsed.address && c.value === parsed.value);
+    if (dup) return { ...dup, duplicate: true };
     const entry = { code: text, enabled: true, ...parsed };
     this.codes.push(entry);
     return entry;
@@ -242,10 +267,17 @@ class GbaCheatList {
 
   restore(list) {
     this.clear();
+    const seen = new Set();
     for (const c of list || []) {
       if (!c || typeof c.code !== 'string') continue;
       const parsed = parseGbaCheatLine(c.code);
-      if (parsed) this.codes.push({ code: c.code.trim().toUpperCase(), enabled: !!c.enabled, ...parsed });
+      if (!parsed) continue;
+      // Normalize duplicates on restore: a list persisted before duplicate
+      // rejection (or edited by hand) should not stay noisy forever.
+      const key = `${parsed.format}|${parsed.address}|${parsed.value}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      this.codes.push({ code: c.code.trim().toUpperCase(), enabled: !!c.enabled, ...parsed });
     }
   }
 }

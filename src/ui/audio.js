@@ -66,10 +66,15 @@ class GBOutputProcessor extends AudioWorkletProcessor {
       }
     }
     if (filled < n) {
-      // underrun: hold the last sample (inaudible compared to a zero drop)
-      for (; filled < n; filled++) { outL[filled] = this.heldL; outR[filled] = this.heldR; }
-      this.underrunFrames += n - filled;
-      if (this.underrunFrames % 16384 < n) this.port.postMessage({ type: 'state', underrunFrames: this.underrunFrames });
+      // underrun: hold the last sample (inaudible compared to a zero drop) —
+      // the freshest one actually written this quantum, else the previous
+      // quantum's tail (a step backwards mid-block).
+      const missing = n - filled; // measure BEFORE filling (filled reaches n below)
+      const holdL = filled > 0 ? outL[filled - 1] : this.heldL;
+      const holdR = filled > 0 ? outR[filled - 1] : this.heldR;
+      for (; filled < n; filled++) { outL[filled] = holdL; outR[filled] = holdR; }
+      this.underrunFrames += missing;
+      if (this.underrunFrames % 16384 < missing) this.port.postMessage({ type: 'state', underrunFrames: this.underrunFrames });
     }
     if (n > 0) { this.heldL = outL[n - 1]; this.heldR = outR[n - 1]; }
     // Report queued backlog periodically so the main thread can pace
@@ -270,4 +275,4 @@ class AudioManager {
   }
 }
 
-if (typeof module !== 'undefined') module.exports = { AudioManager };
+if (typeof module !== 'undefined') module.exports = { AudioManager, AUDIO_WORKLET_SRC };

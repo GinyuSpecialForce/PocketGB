@@ -75,7 +75,11 @@ class Serial {
       this._counter -= tCycles;
       if (this._counter <= 0) {
         const out = this.sb;
-        this._pendingPeer = null;
+        // NOTE: do not clear _pendingPeer here — a byte that arrived during
+        // the shift (peer's reply racing our clock, normal on TCP netplay
+        // where both ends are internal-clock masters) is the transfer result;
+        // clearing it used to force a 0xFF timeout on one side of every
+        // exchange. tick() below decides between it and the reply timeout.
         if (this.onSend) this.onSend(out); // peer may reply synchronously
         if (this._pendingPeer !== null) this._complete(this._pendingPeer);
         else { this._state = ST_MASTER_WAIT; this._counter = REPLY_TIMEOUT; }

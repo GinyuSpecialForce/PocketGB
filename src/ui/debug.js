@@ -75,12 +75,24 @@ class DebugView {
     if (x === 1) return op === 0x76 ? { text: 'HALT', size: 1 } : { text: `LD ${r(y)},${r(z)}`, size: 1 };
     if (x === 2) return { text: `${alu[y]}${r(z)}`, size: 1 };
     // x === 3
-    if (z === 0) return { text: [`RET ${cc(y)}`,undefined,'JP ${undefined}'][0] || `RET ${cc(y)}`, size: 1 };
-    if (z === 1) {
-      if (y & 1) return { text: ['RETI','LD SP,HL'][y >> 1], size: 1 };
-      return { text: `POP ${rp2(p)}`, size: 1 };
+    if (z === 0) {
+      // y 0-3: RET cc (1B); y 4-7: LDH (n),A / LDH A,(n) / ADD SP,e8 / LD HL,SP+e8 (2B)
+      if (y < 4) return { text: `RET ${cc(y)}`, size: 1 };
+      if (y === 4) return { text: `LDH ($${h2(b(1))}),A`, size: 2 };   // 0xE0
+      if (y === 6) return { text: `LDH A,($${h2(b(1))})`, size: 2 };   // 0xF0
+      const e = (b(1) << 24) >> 24;
+      // y 5 = 0xE8 ADD SP,e8 · y 7 = 0xF8 LD HL,SP+e8
+      return { text: y === 5 ? `ADD SP,${e >= 0 ? '+' : ''}${e}` : `LD HL,SP${e >= 0 ? '+' : ''}${e}`, size: 2 };
     }
-    if (z === 2) return { text: `JP ${cc(y)},$${h4(w(1))}`, size: 3 };
+    if (z === 1) {
+      if (!(y & 1)) return { text: `POP ${rp2(p)}`, size: 1 };
+      return { text: ['RET', 'RETI', 'JP HL', 'LD SP,HL'][y >> 1], size: 1 };
+    }
+    if (z === 2) {
+      // y 0-3: JP cc,nn (3B); y 4-7: LDH (C),A / LD (nn),A / LDH A,(C) / LD A,(nn)
+      if (y < 4) return { text: `JP ${cc(y)},$${h4(w(1))}`, size: 3 };
+      return { text: ['LDH (C),A', 'LD (nn),A', 'LDH A,(C)', 'LD A,(nn)'][y - 4], size: (y & 1) ? 3 : 1 };
+    }
     if (z === 3) {
       if (y === 0) return { text: `JP $${h4(w(1))}`, size: 3 };
       if (y === 6) return { text: 'DI', size: 1 };
@@ -88,8 +100,15 @@ class DebugView {
       if (y === 1) return { text: `CB $${h2(b(1))}`, size: 2 }; // handled above normally
       return { text: `DB $${h2(op)}`, size: 1 };
     }
-    if (z === 4) return { text: `CALL ${cc(y)},$${h4(w(1))}`, size: 3 };
-    if (z === 5) return (y & 1) ? { text: `DB $${h2(op)}`, size: 1 } : { text: `PUSH ${rp2(p)}`, size: 1 };
+    if (z === 4) {
+      if (y < 4) return { text: `CALL ${cc(y)},$${h4(w(1))}`, size: 3 };
+      return { text: `DB $${h2(op)}`, size: 1 }; // E4/EC/F4/FC are illegal
+    }
+    if (z === 5) {
+      if (!(y & 1)) return { text: `PUSH ${rp2(p)}`, size: 1 };
+      if (y === 1) return { text: `CALL $${h4(w(1))}`, size: 3 };
+      return { text: `DB $${h2(op)}`, size: 1 }; // DD/ED/FD are illegal
+    }
     if (z === 6) return { text: `${alu[y]}$${h2(b(1))}`, size: 2 };
     return { text: `RST $${h2(y * 8)}`, size: 1 };
   }

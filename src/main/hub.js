@@ -38,6 +38,17 @@ function buildSpawnArgs({ baseArgs, rom = null, role = null, port = 0 }) {
   return args;
 }
 
+// Which end of the cable the spawned window should raise, given the role the
+// parent took. 'host' → the child joins the parent at the port the parent
+// bound. Anything else → no auto-link in the child (its user can raise the
+// cable manually). Passing the parent's own role through used to make the
+// child host the SAME port → EADDRINUSE, and neither side ever connected.
+function childRole(role) {
+  if (role === 'host') return 'join';
+  if (role === 'join') return 'host';
+  return null;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseHubArgs, buildSpawnArgs };
+  module.exports = { parseHubArgs, buildSpawnArgs, childRole };
 }

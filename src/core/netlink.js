@@ -88,6 +88,12 @@ class NetLink {
       sock.on('error', (err) => {
         if (!settled) { settled = true; reject(err); }
       });
+      // A close before 'connect' carries no 'error' event (stop() mid-connect,
+      // peer RST on some platforms) — without this the join promise hangs and
+      // the renderer's await never returns.
+      sock.on('close', () => {
+        if (!settled) { settled = true; reject(new Error('connection closed before established')); }
+      });
       this._wire(sock);
     });
   }

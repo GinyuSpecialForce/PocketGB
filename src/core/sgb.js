@@ -145,7 +145,7 @@ class SGB {
       case 0x0A: this.palSet(p); break;
       case 0x0B: this.pendingTrn = 'pal'; break;           // PAL_TRN
       case 0x11: this.mltReq(p); break;
-      case 0x13: this.pendingTrn = p[1] & 2 ? 'chr-obj' : 'chr-bg'; break; // CHR_TRN
+      case 0x13: this.pendingTrn = p[1] & 1 ? 'chr-hi' : 'chr-lo'; break; // CHR_TRN: bit0 = tile half
       case 0x14: this.pendingTrn = 'pct'; break;           // PCT_TRN
       case 0x15: this.pendingTrn = 'attr'; break;          // ATTR_TRN
       case 0x16: this.attrSet(p); break;
@@ -169,8 +169,13 @@ class SGB {
       this.active[i] = np;
       for (let c = 0; c < 4; c++) this.palData[i * 16 + c] = this.systemPal[np * 4 + c];
     }
-    // Attribute-file / cancel-mask bits (byte 9 bit 6/7) apply after palettes.
+    // Attribute-file / cancel-mask bits (byte 9) apply after palettes:
+    // bit 6 cancels the screen mask, bit 7 applies ATF (attrFile 0-0x2C).
     if (p[9] & 0x40) this.mask = 0;
+    if (p[9] & 0x80) {
+      const n = p[9] & 0x3F;
+      if (n < 45) this.attrMap.set(this.atf[n]);
+    }
   }
 
   attrSet(p) {
@@ -302,9 +307,11 @@ class SGB {
       }
     } else if (what === 'pal') {
       for (let i = 0; i < 512 * 4; i++) this.systemPal[i] = block[i * 2] | (block[i * 2 + 1] << 8);
-    } else if (what === 'chr-bg' || what === 'chr-obj') {
+    } else if (what === 'chr-lo' || what === 'chr-hi') {
+      // CHR_TRN param bit 0 picks the tile half (0: tiles 00h-7Fh, 1: 80h-FFh);
+      // the BG/OBJ bit (bit 1) has no effect — both write the same VRAM.
+      const half = what === 'chr-lo' ? 0 : 128;
       if (!this.borderTiles) this.borderTiles = new Uint8Array(256 * 32);
-      const half = what === 'chr-bg' ? 0 : 128; // both write the same bank per docs
       for (let t = 0; t < 128; t++) {
         for (let b = 0; b < 32; b++) this.borderTiles[(half + t) * 32 + b] = block[t * 32 + b];
       }

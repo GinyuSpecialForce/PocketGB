@@ -29,7 +29,9 @@ class MovieRecorder {
     };
   }
   observe(mask) {
-    if (this.recording) this.frames.push(mask & 0xFF);
+    // Keep the full 10-bit v2 mask (bits 0-7 = GB pad, 8/9 = GBA L/R). Masking
+    // to 0xFF here would silently drop every shoulder press on record.
+    if (this.recording) this.frames.push(mask & 0x3FF);
   }
   stop() {
     this.recording = false;
@@ -104,7 +106,9 @@ class MoviePlayer {
     if (!this.playing || this.pos >= this.frames.length) { this.playing = false; return null; }
     return this.frames[this.pos++] | (this.frames[this.pos++] << 8);
   }
-  get progress() { return this.total ? this.pos / this.total : 0; }
+  // pos is a BYTE offset (2 bytes/frame), total is a FRAME count — halve pos so
+  // progress is a 0..1 fraction instead of running to 2.0 (200%).
+  get progress() { return this.total ? (this.pos / 2) / this.total : 0; }
 }
 
 // mask ↔ joypad state-object conversion.

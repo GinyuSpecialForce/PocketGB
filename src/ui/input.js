@@ -22,9 +22,9 @@ const DEFAULT_BINDINGS = {
 if (typeof window !== 'undefined') window.DEFAULT_BINDINGS = DEFAULT_BINDINGS; // plain-script global
 
 // Hotkeys are fixed (not remapped): Tab turbo, Backspace rewind, F2 cheats,
-// F6 effects, F8 practice-reset, F10 keys. Listed here only so InputManager
-// can ignore them when they collide with bindings.
-const RESERVED = new Set(['Tab', 'Backspace', 'F2', 'F6', 'F8', 'F10']);
+// F6 effects, F7 instant replay, F8 practice-reset, F10 keys. Listed here only
+// so InputManager can ignore them when they collide with bindings.
+const RESERVED = new Set(['Tab', 'Backspace', 'F2', 'F6', 'F7', 'F8', 'F10']);
 
 class InputManager {
   constructor() {
@@ -52,7 +52,10 @@ class InputManager {
     this._padRAF = requestAnimationFrame(() => this.pollGamepad());
     if (!this.gamepadEnabled) return;
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    const next = { up: false, down: false, left: false, right: false, a: false, b: false, start: false, select: false };
+    // NOTE: every key padState can ever hold MUST appear here as false —
+    // this object doubles as the diff baseline. L/R were missing once, so a
+    // gamepad shoulder press stuck down forever (release never diffed).
+    const next = { up: false, down: false, left: false, right: false, a: false, b: false, start: false, select: false, l: false, r: false };
     for (const pad of pads) {
       if (!pad) continue;
       for (const [idx, btn] of Object.entries(PAD_BUTTONS)) {

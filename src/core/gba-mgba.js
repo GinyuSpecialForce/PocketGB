@@ -31,6 +31,11 @@ const BTN_BY_STATE = [
 const CHEATS_PATH = '/data/cheats/game.cheats';
 
 class MgbaMachine {
+  // Monotonic save-state clock (process-wide): every fresh saveState gets the
+  // next number, so consumers can tell whether a value came from a state
+  // newer than the one they last read.
+  static _stateClock = 0;
+
   constructor(Module) {
     this.Module = Module;
     this.ready = false;
@@ -39,6 +44,9 @@ class MgbaMachine {
     this.saveType = null;
     this.cheats = []; // { code, enabled } — app-owned source of truth; synced to the core via .cheats file
     this._frozen = new Map(); // addr -> value, re-applied every frame (needs memory access)
+    // Fresh-state clock for the cheat finder (see _stateClock): 0 until the
+    // first saveState(), reset to 0 on discontinuities.
+    this._stateStamp = 0;
     this._coreFrameSerial = 0; // bumped by the core's videoFrameEnded callback
     this._harvestedSerial = -1;
     this._serialTrust = undefined; // undefined = probe not started yet
@@ -137,6 +145,7 @@ class MgbaMachine {
     if (!this.ready) return 'no game';
     this.cheats = (list || []).map((c) => ({ code: String(c.code || ''), enabled: !!c.enabled }));
     this._writeCheatsFile();
+    this._stateStamp = 0; // the emulated side is about to change discontinuously
     const atBoot = this._cheatsAtBoot || 0;
     const now = this.cheats.length;
     if (atBoot === 0 && now === 0) return 'applied'; // nothing ever loaded
@@ -346,6 +355,7 @@ class MgbaMachine {
     try { this.Module.forceAutoSaveState(); } catch { /* before first frame */ }
     const auto = this.Module.getAutoSaveState();
     if (!auto || !auto.data || !auto.data.length) throw new Error('save state failed');
+    this._stateStamp = ++MgbaMachine._stateClock; // new observation window
     return new Uint8Array(auto.data);
   }
 
@@ -354,7 +364,13 @@ class MgbaMachine {
     const path = this.Module.autoSaveStateName;
     if (path) this.Module.FS.writeFile(path, bytes);
     this.Module.loadAutoSaveState();
+    this._stateStamp = 0; // discontinuity: stamp comparisons must not straddle it
   }
+
+  // Monotonic counter bumped by every fresh saveState; other consumers (the
+  // cheat finder) compare stamps to tell whether a value came from a state
+  // newer than the one they last read.
+  stateStamp() { return this._stateStamp; }
 
   destroy() {
     try { if (this.ready) this.Module.quitGame(); } catch { /* already gone */ }

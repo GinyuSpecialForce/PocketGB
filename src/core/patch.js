@@ -396,27 +396,58 @@ function applyRupFile(rom, file, undo, validate) {
   return Uint8Array.from(out);
 }
 
-// ---- PPF (v1/2/3 — format: romhacking.net/utilities/353) ----
-// "PPF" + "10".."30" + u8 version-1, 50-byte description. v3: imageType,
-// blockCheck flag, undo flag, dummy. v2: u32 input size. blockCheck → 1024
-// bytes. Records: u32 offset (LE, v3 adds a second u32 = high half), u8 len,
-// data[, undo data]. Trailing "@BEG_FILE_ID.DIZ" block is metadata.
+// PPF v2/v3 block check: the patch embeds 1024 bytes of the original image
+// (from 0x9320 for BIN images, 0x80A0 for GI) — a wrong-base ROM is rejected
+// before any record is applied. Returns false when the ROM is too small.
+function blockCheckMatches(p, patchOff, rom, romOff) {
+  if (romOff + 1024 > rom.length) return false;
+  for (let k = 0; k < 1024; k++) if (p[patchOff + k] !== rom[romOff + k]) return false;
+  return true;
+}
+
+// ---- PPF (v1/2/3 — reference: ApplyPPF3.c by Icarus/Paradox) ----
+// Header: "PPF" + "10"|"20"|"30" + 50-byte description. v2 adds a u32 LE
+// original-image size at 56, then the MANDATORY 1024-byte block check at 60.
+// v3 adds imageType(56: 0=BIN, 1=GI), blockCheck(57), undo(58), dummy(59);
+// the 1024-byte check block sits at 60 when blockCheck is set. Records start
+// at 56 (v1), 1084 (v2, after size+block), 60 (v3 without block check) or
+// 1084 (v3 with block check). Record: u32 LE offset (+second u32 high half in
+// v3), u8 len, data[, undo data when the undo flag is set]. Trailing
+// "@BEG_FILE_ID.DIZ" block is metadata.
 function applyPpf(rom, p) {
   const str = (o, n) => { let s = ''; for (let i = 0; i < n; i++) s += String.fromCharCode(p[o + i]); return s; };
   if (p.length < 56 || str(0, 3) !== 'PPF') return null;
   const verStr = str(3, 2);
   const version = parseInt(verStr, 10) / 10;
-  const version2 = p[5] + 1;
-  if (!(version === 1 || version === 2 || version === 3) || version !== version2) return null;
+  if (version !== 1 && version !== 2 && version !== 3) return null;
   let i = 6 + 50;
   let undo = false;
-  if (version === 3) {
+  let recordsAt = i;
+  if (version === 2) {
+    // u32 original size (informational for us), then the required block check
     if (i + 4 > p.length) return null;
+    i += 4;
+    if (i + 1024 > p.length) return null; // v2 always carries the block
+    if (!blockCheckMatches(p, i, rom, 0x9320)) return null; // wrong image
+    i += 1024;
+    recordsAt = i;
+  } else if (version === 3) {
+    if (i + 4 > p.length) return null;
+    const imageType = p[i];
+    const blockCheck = p[i + 1];
     undo = p[i + 2] === 1;
     i += 4;
+    if (blockCheck) {
+      if (i + 1024 > p.length) return null;
+      // BIN images check at 0x9320; GI images (PrimoDVD) at 0x80A0
+      if (!blockCheckMatches(p, i, rom, imageType ? 0x80A0 : 0x9320)) return null;
+      i += 1024;
+    }
+    recordsAt = i;
   }
   // (v1 has no undo; v2 has no undo flag — undo data only exists in v3)
   const records = [];
+  i = recordsAt;
   while (i < p.length) {
     if (str(i, 4) === '@BEG') { // FILE_ID.DIZ trailer — metadata, stop parsing
       break;

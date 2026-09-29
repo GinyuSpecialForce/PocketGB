@@ -70,3 +70,6 @@ const BUILTIN_SHADER_PACKS = [
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { BUILTIN_SHADER_PACKS };
 }
+if (typeof window !== 'undefined') {
+  window.PocketBuiltinPacks = { BUILTIN_SHADER_PACKS };
+}

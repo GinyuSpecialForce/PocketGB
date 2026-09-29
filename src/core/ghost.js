@@ -125,7 +125,11 @@ class GhostRacer {
     //              timelines are no longer comparable from here.
     this.nextEcho = this.frames[this.pos * 2] | (this.frames[this.pos * 2 + 1] << 8);
     if (mainMask !== undefined && mainMask !== null) {
-      if ((mainMask & 0xFF) !== this.nextEcho) {
+      // Compare the GB pad bits only (0-7). mainMask arrives already masked to
+      // 0xFF by the app (GB has no shoulder buttons), and a v2 recording may
+      // carry L/R in bits 8/9 — comparing raw widths would flag those frames as
+      // false divergence even when the GB-relevant input matches exactly.
+      if ((mainMask & 0xFF) !== (this.nextEcho & 0xFF)) {
         if (!this.diverged) this._divergeAt = this.pos; // first frame off the path
         this.diverged = true;
       }

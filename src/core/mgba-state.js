@@ -16,8 +16,8 @@
 //   0x00000..0x19000  CPU/scheduler state, palette RAM, OAM, I/O, VRAM
 //   0x19000..0x21000  IWRAM (32 KB)
 //   0x21000..0x61000  EWRAM (256 KB) — runs to the end of the payload
-// If a future core build shuffles the layout, `describeLayout` catches it:
-// the windows must fit exactly or the module refuses to serve bytes.
+// If a future core build shuffles the layout, the MgbaState size check
+// rejects the state instead of serving bytes from wrong offsets.
 'use strict';
 
 // PNG chunk walk: after the 8-byte signature each chunk is
@@ -59,16 +59,14 @@ function replacePngChunk(bytes, type, newData) {
 // Web Streams CompressionStream/DecompressionStream API, so one async code
 // path serves the app, the tests, and tooling alike.
 
-function _streamBytes(bytes, transform) {
-  return new Response(new Blob([bytes]).stream().pipeThrough(transform)).arrayBuffer();
-}
-
 function inflate(bytes) {
-  return _streamBytes(bytes, new DecompressionStream('deflate')).then((ab) => new Uint8Array(ab));
+  return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate')))
+    .arrayBuffer().then((ab) => new Uint8Array(ab));
 }
 
 function deflate(bytes) {
-  return _streamBytes(bytes, new CompressionStream('deflate')).then((ab) => new Uint8Array(ab));
+  return new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate')))
+    .arrayBuffer().then((ab) => new Uint8Array(ab));
 }
 
 // ---- state layout ----------------------------------------------------------
@@ -114,9 +112,6 @@ class MgbaState {
     const off = busToPayload(addr);
     if (off !== null) this.payload[off] = value & 0xFF;
   }
-
-  // True when a bus address maps into a scannable window (EWRAM/IWRAM).
-  static scannable(addr) { return busToPayload(addr) !== null; }
 }
 
 // ---- codec -----------------------------------------------------------------
@@ -129,32 +124,17 @@ async function decodeState(pngBytes) {
   return new MgbaState(payload);
 }
 
-// Rebuild the full PNG around a state payload. The original PNG is passed in
-// so all other chunks (screenshot, metadata, IEND) are preserved untouched.
+// Rebuild the full PNG around a (possibly patched) state payload. The original
+// PNG is passed in so all other chunks (screenshot, metadata, IEND) are
+// preserved untouched.
 async function rebuildStatePng(pngBytes, state) {
   const newData = await deflate(state.payload);
   return replacePngChunk(pngBytes, 'gbAs', newData);
 }
 
-// One-call patcher: decode → mutate → rebuild → return loadable PNG bytes.
-// mutate receives the MgbaState and may read/patch any window.
-async function patchState(pngBytes, mutate) {
-  const state = await decodeState(pngBytes);
-  mutate(state);
-  return rebuildStatePng(pngBytes, state);
-}
-
-// Sanity-check that a payload still matches the expected fixed layout — used
-// by tests and by the finder before trusting window offsets.
-function describeLayout(payloadLen) {
-  const parts = [LAYOUT.ewram, LAYOUT.iwram];
-  const ok = payloadLen === LAYOUT.total && parts.every((w) => w.at + w.size <= payloadLen);
-  return { ok, total: LAYOUT.total, ewram: LAYOUT.ewram, iwram: LAYOUT.iwram };
-}
-
 if (typeof module !== 'undefined') {
-  module.exports = { MgbaState, decodeState, rebuildStatePng, patchState, findPngChunk, replacePngChunk, inflate, deflate, busToPayload, describeLayout, LAYOUT };
+  module.exports = { MgbaState, decodeState, rebuildStatePng, findPngChunk, replacePngChunk, busToPayload, LAYOUT };
 }
 if (typeof window !== 'undefined') {
-  window.PocketMgbaState = { MgbaState, decodeState, rebuildStatePng, patchState, findPngChunk, replacePngChunk, inflate, deflate, busToPayload, describeLayout, LAYOUT };
+  window.PocketMgbaState = { MgbaState, decodeState, rebuildStatePng, findPngChunk, replacePngChunk, busToPayload, LAYOUT };
 }
